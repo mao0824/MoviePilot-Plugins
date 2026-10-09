@@ -12,6 +12,7 @@ NAS 哨兵 (nas-sentinel) — MoviePilot 插件
 
 import html
 import re
+import threading
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -60,7 +61,7 @@ class NasSentinel(_PluginBase):
     plugin_name = "NAS 哨兵"
     plugin_desc = "通用哨兵:站点签到补位、考核进度追踪、刷流与磁盘 IO 健康巡检,异常即报。"
     plugin_icon = "sentinel.png"
-    plugin_version = "0.1.2"
+    plugin_version = "0.2.0"
     plugin_author = "Niven"
     author_url = "https://github.com/mao0824"
     plugin_config_prefix = "nassentinel_"
@@ -155,13 +156,14 @@ class NasSentinel(_PluginBase):
         return services
 
     def get_api(self) -> List[Dict[str, Any]]:
+        # 同时供「插件页面按钮」调用:events.click.api = plugin/<类名><path>
         return [
-            {"path": "/run", "endpoint": self.api_run, "methods": ["GET"],
-             "summary": "立即执行一次完整巡检(签到+考核+IO)"},
-            {"path": "/io", "endpoint": self.api_io, "methods": ["GET"],
-             "summary": "立即执行一次 IO 巡检"},
-            {"path": "/signin", "endpoint": self.api_signin, "methods": ["GET"],
-             "summary": "立即执行一次站点签到"},
+            {"path": "/run", "endpoint": self.api_run, "methods": ["GET", "POST"],
+             "auth": "bear", "summary": "立即执行一次完整巡检(签到+考核+IO)"},
+            {"path": "/io", "endpoint": self.api_io, "methods": ["GET", "POST"],
+             "auth": "bear", "summary": "立即执行一次 IO 巡检"},
+            {"path": "/signin", "endpoint": self.api_signin, "methods": ["GET", "POST"],
+             "auth": "bear", "summary": "立即执行一次站点签到"},
         ]
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
@@ -262,6 +264,11 @@ class NasSentinel(_PluginBase):
                 "content": [
                     self.__row([self.__alert("上次巡检:%s" % (last.get("time") or "从未运行"),
                                              "info", 12)]),
+                    self.__row([
+                        self.__btn("立即巡检", "mdi-radar", "/run"),
+                        self.__btn("立即签到", "mdi-calendar-check", "/signin"),
+                        self.__btn("IO 检查", "mdi-speedometer", "/io"),
+                    ]),
                     self.__row([self.__readonly("exam_view", "考核进度", 12, exam_text)]),
                     self.__row([self.__readonly("sign_view", "签到结果", 12, sign_text)]),
                     self.__row([self.__readonly("io_view", "IO 健康", 12, io_text)]),
@@ -275,14 +282,23 @@ class NasSentinel(_PluginBase):
     # =====================================================================
     # API 端点
     # =====================================================================
+    @staticmethod
+    def __bg(func, **kwargs):
+        """后台执行:长任务不阻塞 HTTP 响应,避免页面按钮转圈超时。"""
+        threading.Thread(target=func, kwargs=kwargs, daemon=True).start()
+
     def api_run(self):
-        return {"success": True, "message": self.run_daily(manual=True)}
+        self.__bg(self.run_daily, manual=True)
+        return {"success": True,
+                "message": "已开始巡检(签到 + 考核 + IO),约 10~20 秒后刷新本页查看结果"}
 
     def api_io(self):
-        return {"success": True, "message": self.run_io(manual=True)}
+        self.__bg(self.run_io, manual=True)
+        return {"success": True, "message": "已开始 IO 巡检,约 10 秒后刷新本页查看结果"}
 
     def api_signin(self):
-        return {"success": True, "message": "; ".join(self.__do_signin()) or "无站点需签到"}
+        self.__bg(self.__do_signin)
+        return {"success": True, "message": "已开始站点签到,约 10 秒后刷新本页查看结果"}
 
     # =====================================================================
     # 巡检主体
@@ -808,6 +824,15 @@ class NasSentinel(_PluginBase):
                            "props": {"model": model, "label": label, "multiple": True,
                                      "chips": True, "clearable": True,
                                      "items": options}}, md)
+
+    def __btn(self, text: str, icon: str, path: str, md: int = 4) -> dict:
+        """鼠标可点的操作按钮:click 事件映射到本插件 API。"""
+        return self.__col({
+            "component": "VBtn",
+            "props": {"class": "ma-1", "variant": "tonal", "prepend-icon": icon, "block": True},
+            "text": text,
+            "events": {"click": {"api": "plugin/%s%s" % (self.__class__.__name__, path)}},
+        }, md)
 
     def __alert(self, text: str, type_: str, md: int) -> dict:
         return self.__col({"component": "VAlert",
