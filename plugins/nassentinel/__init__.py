@@ -1,12 +1,14 @@
 """
 NAS 哨兵 (nas-sentinel) — MoviePilot 插件
 
-通用哨兵:把「站点签到、考核进度、刷流/磁盘 IO 健康」三件需要人盯的事,
-变成自动巡检 + 到点告警。
+聚焦「刷流与磁盘 IO 健康」:把不需要人盯的事交给它,到点告警。
+
+范围(2026-10-10 用户决定):站点签到交给 AutoSignIn(实测可签 PTS),
+新手考核交给专门的考核插件 —— 本插件不再重复实现,只保留 IO 哨兵、
+自动降级/恢复、刷流促销守护与简报。
 
 设计原则(为了将来能发布给其他人用):
   * 不写死任何本机路径/设备名/下载器名,全部可配置
-  * 站点相关操作用「通用 NexusPHP 格式」解析,不针对单一站点硬编码
   * 失败隔离:任一模块异常不影响其它模块,全部输出到日志
 
 渲染契约(踩坑记录,MP v3 前端 renderer 的真实行为):
@@ -20,7 +22,6 @@ NAS 哨兵 (nas-sentinel) — MoviePilot 插件
     VDialogCloseBtn / VAceEditor / VApexChart / VPageContentTitle 等。
 """
 
-import html
 import re
 import threading
 import time
@@ -50,37 +51,12 @@ try:
 except Exception:  # pragma: no cover
     NotificationChannel = None
 
-try:
-    from app.db.site_oper import SiteOper
-except Exception:  # pragma: no cover
-    SiteOper = None
-
-
-DEFAULT_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-              "(KHTML, like Gecko) Chrome/131.0 Safari/537.36")
-
-# NexusPHP 考核公告的标准格式:
-#   名称：新手考核 时间：2026-10-09 11:37:10 ~ 2026-11-08 11:37:10
-#   指标1：上传增量, 要求：30 GB, 当前：614.59 MB, 结果： 未通过！
-RE_EXAM_TIME = re.compile(r"时间：\s*(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s*~\s*(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
-RE_EXAM_ITEM = re.compile(
-    r"指标\s*(\d+)\s*：\s*([^,，]{1,24})\s*[,，]\s*要求\s*：\s*([^,，]{1,24})\s*[,，]\s*"
-    r"当前\s*：\s*([^,，]{1,24})\s*[,，]\s*结果\s*：\s*([^！!]{1,12})[！!]?"
-)
-RE_EXAM_NAME = re.compile(r"名称\s*：\s*([^时]{1,40}?)\s*时间\s*：")
-RE_SIGNED = re.compile(
-    r"(已经签到|今日已签到|已签到|签到成功|已连续签到|签到已得|本次签到获得|补签卡)")
-RE_UNIT_NUM = re.compile(r"([\d.]+)\s*([KMGTP]?B)?", re.I)
-
-UNIT_FACTOR = {"B": 1, "KB": 1024, "MB": 1024 ** 2, "GB": 1024 ** 3, "TB": 1024 ** 4}
-
-
 class NasSentinel(_PluginBase):
     # ---- 插件元信息 ---------------------------------------------------------
     plugin_name = "NAS 哨兵"
-    plugin_desc = "通用哨兵:站点签到补位、考核进度追踪、刷流与磁盘 IO 健康巡检,异常即报。"
+    plugin_desc = "刷流与磁盘 IO 健康哨兵:积压/队列/上传速率巡检、超红线自动降级、刷流促销敞口守护。"
     plugin_icon = "sentinel.png"
-    plugin_version = "0.3.4"
+    plugin_version = "0.4.0"
     plugin_author = "Niven"
     author_url = "https://github.com/mao0824"
     plugin_config_prefix = "nassentinel_"
@@ -98,29 +74,6 @@ class NasSentinel(_PluginBase):
     _quiet_start = ""
     _quiet_end = ""
 
-    # ---- 签到 --------------------------------------------------------------
-    _signin_enabled = True
-    _signin_sites: List[int] = []
-    _signin_path = "/attendance.php"
-    _signin_cron = ""
-    _signin_retry = 1
-    _signin_notify = True
-    _signin_skip_signed = True
-    _signin_ua = ""
-    _signin_cookie = ""
-    _signin_extra_form = ""
-
-    # ---- 考核 --------------------------------------------------------------
-    _exam_enabled = True
-    _exam_sites: List[int] = []
-    _exam_paths: List[str] = ["/rules.php", "/"]
-    _exam_keyword = "考核"
-    _exam_cron = ""
-    _exam_warn_days = 5
-    _exam_notify_risk = True
-    _exam_metrics = ""
-    _exam_site_config = ""
-
     # ---- IO ---------------------------------------------------------------
     _io_enabled = True
     _io_interval = 5
@@ -133,7 +86,8 @@ class NasSentinel(_PluginBase):
     _latency_threshold = 1500.0
     _up_rate_min = 1.0
     _io_check_qbt = True
-    _io_keep = 20
+    # 保留采样条数:288 ≈ 24h@5min(与配置页默认值保持一致)
+    _io_keep = 288
     _io_notify_cooldown = 30
 
     # ---- 自动降级 / 恢复 ---------------------------------------------------
@@ -146,7 +100,6 @@ class NasSentinel(_PluginBase):
     _recover_wait = 30
 
     _qb_downloader = ""
-    _http_timeout = 25
 
     def init_plugin(self, config: dict = None):
         cfg = config or {}
@@ -160,29 +113,6 @@ class NasSentinel(_PluginBase):
         self._debug = bool(cfg.get("debug"))
         self._quiet_start = (cfg.get("quiet_start") or "").strip()
         self._quiet_end = (cfg.get("quiet_end") or "").strip()
-
-        # 签到
-        self._signin_enabled = cfg.get("signin_enabled", True)
-        self._signin_sites = self.__as_int_list(cfg.get("signin_sites"))
-        self._signin_path = (cfg.get("signin_path") or "/attendance.php").strip()
-        self._signin_cron = (cfg.get("signin_cron") or "").strip()
-        self._signin_retry = self.__as_int(cfg.get("signin_retry"), 1, 0, 5)
-        self._signin_notify = cfg.get("signin_notify", True)
-        self._signin_skip_signed = cfg.get("signin_skip_signed", True)
-        self._signin_ua = (cfg.get("signin_ua") or "").strip()
-        self._signin_cookie = (cfg.get("signin_cookie") or "").strip()
-        self._signin_extra_form = (cfg.get("signin_extra_form") or "").strip()
-
-        # 考核
-        self._exam_enabled = cfg.get("exam_enabled", True)
-        self._exam_sites = self.__as_int_list(cfg.get("exam_sites"))
-        self._exam_paths = self.__as_str_list(cfg.get("exam_paths")) or ["/rules.php", "/"]
-        self._exam_keyword = (cfg.get("exam_keyword") or "考核").strip()
-        self._exam_cron = (cfg.get("exam_cron") or "").strip()
-        self._exam_warn_days = self.__as_int(cfg.get("exam_warn_days"), 5, 0, 60)
-        self._exam_notify_risk = cfg.get("exam_notify_risk", True)
-        self._exam_metrics = (cfg.get("exam_metrics") or "").strip()
-        self._exam_site_config = (cfg.get("exam_site_config") or "").strip()
 
         # IO
         self._io_enabled = cfg.get("io_enabled", True)
@@ -198,7 +128,7 @@ class NasSentinel(_PluginBase):
         self._latency_threshold = self.__as_float(cfg.get("latency_threshold"), 1500.0)
         self._up_rate_min = self.__as_float(cfg.get("up_rate_min"), 1.0)
         self._io_check_qbt = cfg.get("io_check_qbt", True)
-        self._io_keep = self.__as_int(cfg.get("io_keep"), 20, 1, 500)
+        self._io_keep = self.__as_int(cfg.get("io_keep"), 288, 1, 500)
         self._io_notify_cooldown = self.__as_int(cfg.get("io_notify_cooldown"), 30, 1, 1440)
 
         # 刷流促销守护:站点「免费」是限时的,排队久了会在免费期结束后才开跑 -> 计下载量
@@ -215,7 +145,6 @@ class NasSentinel(_PluginBase):
         self._recover_wait = self.__as_int(cfg.get("recover_wait"), 30, 1, 1440)
 
         self._qb_downloader = (cfg.get("qb_downloader") or "").strip()
-        self._http_timeout = self.__as_int(cfg.get("http_timeout"), 25, 5, 120)
 
         # 「立即运行一次」:保存配置后触发一次完整巡检(不改变开关状态)
         if cfg.get("run_once"):
@@ -237,7 +166,7 @@ class NasSentinel(_PluginBase):
         if not self._enabled:
             return services
 
-        # 1) 每日巡检:签到 + 考核 + IO + 简报
+        # 1) 每日巡检:IO + 促销敞口 + 简报
         if self.__cron_ok(self._cron):
             services.append({
                 "id": "NasSentinelDaily",
@@ -246,25 +175,7 @@ class NasSentinel(_PluginBase):
                 "func": self.run_daily,
                 "kwargs": {},
             })
-        # 2) 独立签到周期(留空则并入侵检)
-        if self._signin_enabled and self.__cron_ok(self._signin_cron):
-            services.append({
-                "id": "NasSentinelSignin",
-                "name": "NAS哨兵-站点签到",
-                "trigger": CronTrigger.from_crontab(self._signin_cron),
-                "func": self.run_signin,
-                "kwargs": {},
-            })
-        # 3) 独立考核检查周期(留空则并入侵检)
-        if self._exam_enabled and self.__cron_ok(self._exam_cron):
-            services.append({
-                "id": "NasSentinelExam",
-                "name": "NAS哨兵-考核追踪",
-                "trigger": CronTrigger.from_crontab(self._exam_cron),
-                "func": self.run_exam,
-                "kwargs": {},
-            })
-        # 4) IO 哨兵:按间隔采样,异常即报
+        # 2) IO 哨兵:按间隔采样,异常即报
         if self._io_enabled:
             services.append({
                 "id": "NasSentinelIO",
@@ -279,15 +190,11 @@ class NasSentinel(_PluginBase):
         # 同时供「插件页面按钮」调用:events.click.api = plugin/<类名><path>
         return [
             {"path": "/run", "endpoint": self.api_run, "methods": ["GET", "POST"],
-             "auth": "bear", "summary": "立即执行一次完整巡检(签到+考核+IO)"},
+             "auth": "bear", "summary": "立即执行一次完整巡检(IO+促销敞口)"},
             {"path": "/io", "endpoint": self.api_io, "methods": ["GET", "POST"],
              "auth": "bear", "summary": "立即执行一次 IO 巡检"},
             {"path": "/promo", "endpoint": self.api_promo, "methods": ["GET", "POST"],
              "auth": "bear", "summary": "立即检查刷流种子的免费期敞口"},
-            {"path": "/signin", "endpoint": self.api_signin, "methods": ["GET", "POST"],
-             "auth": "bear", "summary": "立即执行一次站点签到"},
-            {"path": "/exam", "endpoint": self.api_exam, "methods": ["GET", "POST"],
-             "auth": "bear", "summary": "立即执行一次考核进度检查"},
             {"path": "/enable", "endpoint": self.api_enable, "methods": ["GET", "POST"],
              "auth": "bear", "summary": "启用本插件(等效于插件列表开关)"},
             {"path": "/disable", "endpoint": self.api_disable, "methods": ["GET", "POST"],
@@ -300,13 +207,6 @@ class NasSentinel(_PluginBase):
     # 配置表单
     # ---------------------------------------------------------------------
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
-        site_opts = []
-        try:
-            if SiteOper is not None:
-                site_opts = [{"title": s.name, "value": s.id} for s in SiteOper().list_order_by_pri()]
-        except Exception as e:
-            logger.warn(f"【NAS哨兵】读取站点列表失败:{e}")
-
         chan_opts = [{"title": "全部渠道(默认)", "value": ""}]
         if NotificationChannel is not None:
             for m in NotificationChannel:
@@ -335,72 +235,17 @@ class NasSentinel(_PluginBase):
                             self.__switch("notify_issue", "异常即报", 4),
                         ]),
                         self.__row([
-                            self.__text("quiet_start", "免打扰开始(HH:MM)", 3, "如 23:30,留空=不启用"),
-                            self.__text("quiet_end", "免打扰结束(HH:MM)", 3, "如 07:00"),
-                            self.__text("http_timeout", "请求超时(秒)", 3, "25"),
-                            self.__switch("debug", "详细日志", 3),
+                            self.__text("quiet_start", "免打扰开始(HH:MM)", 4, "如 23:30,留空=不启用"),
+                            self.__text("quiet_end", "免打扰结束(HH:MM)", 4, "如 07:00"),
+                            self.__switch("debug", "详细日志", 4),
                         ]),
-                        self.__alert("合上这两个开关看效果:下面各分组里,只有「已启用」的模块才会"
-                                     "展开其详细参数(条件显隐由 MP 的 v-show 合并默认值机制保证安全)。",
+                        self.__alert("下面各分组里,只有「已启用」的模块才会展开其详细参数"
+                                     "(条件显隐由 MP 的 v-show 合并默认值机制保证安全)。",
                                      "info", 12),
                     ]),
 
-                    # ========== ② 站点签到 ==========
-                    self.__card("② 站点签到(NexusPHP 通用)", "mdi-calendar-check", [
-                        self.__row([
-                            self.__switch("signin_enabled", "启用签到", 3),
-                            self.__switch("signin_notify", "签到结果通知", 3),
-                            self.__switch("signin_skip_signed", "已签到则跳过", 3),
-                            self.__text("signin_retry", "失败重试次数", 3, "1"),
-                        ]),
-                        self.__row([
-                            self.__select("signin_sites", "需要签到的站点", 8, site_opts),
-                            self.__text("signin_path", "签到相对路径", 4, "/attendance.php"),
-                        ], show="signin_enabled"),
-                        self.__row([
-                            self.__cron("signin_cron", "独立签到周期(留空=并入侵检)", 4, "0 9 * * *"),
-                            self.__text("signin_ua", "自定义 UA(留空=用站点 UA)", 4, ""),
-                            self.__text("signin_cookie", "自定义 Cookie(留空=用站点 Cookie)", 4, ""),
-                        ], show="signin_enabled"),
-                        self.__row([
-                            self.__textarea("signin_extra_form", "附加表单字段", 12, 4,
-                                            "每行一个 k=v,POST 时并入表单(个别站点需要固定附加参数时用)\n"
-                                            "例:type=signin"),
-                        ], show="signin_enabled"),
-                    ]),
-
-                    # ========== ③ 考核追踪 ==========
-                    self.__card("③ 考核进度追踪(NexusPHP 通用)", "mdi-clipboard-check", [
-                        self.__row([
-                            self.__switch("exam_enabled", "启用考核追踪", 3),
-                            self.__switch("exam_notify_risk", "有风险立即通知", 3),
-                            self.__text("exam_warn_days", "剩余天数告警阈值", 3, "5"),
-                            self.__text("exam_metrics", "重点关注指标(逗号分隔,留空=全部)", 3, "上传,积分"),
-                        ]),
-                        self.__row([
-                            self.__select("exam_sites", "需要追踪考核的站点", 6, site_opts),
-                            self.__text("exam_paths", "考核页面路径(逗号分隔)", 3, "/rules.php,/"),
-                            self.__text("exam_keyword", "识别关键词", 3, "考核"),
-                        ], show="exam_enabled"),
-                        self.__row([
-                            self.__cron("exam_cron", "独立考核检查周期(留空=并入侵检)", 12, "35 8 * * *"),
-                        ], show="exam_enabled"),
-                        self.__row([
-                            self.__textarea("exam_site_config", "考核单点配置(按站覆盖)", 12, 6,
-                                            "每行一条,字段用 | 分隔:# 开头为注释\n"
-                                            "站点ID | 考核页面 | 上传目标 | 做种积分目标 | 分享率目标 | 备注\n"
-                                            "目标也支持 关键词=目标 写法,如:上传=83.2GB;积分=1200;分享率=1.05\n"
-                                            "示例:\n4 | /rules.php | 83.2GB | 0 | 0 | PTS 新手考核\n"
-                                            "3 | | 300GB | | 1.2 | 填写空白字段表示用页面上的要求"),
-                        ], show="exam_enabled"),
-                        self.__alert("考核单点配置用来解决「同一站点无法单独配置」的问题:"
-                                     "可为每个站点分别指定考核页面与各项指标目标值,"
-                                     "插件会用你填的目标替代页面上的要求参与达成度与风险推算。",
-                                     "info", 12, show="exam_enabled"),
-                    ]),
-
-                    # ========== ④ IO 哨兵 ==========
-                    self.__card("④ 磁盘 / 刷流 IO 哨兵", "mdi-speedometer", [
+                    # ========== ② IO 哨兵 ==========
+                    self.__card("② 磁盘 / 刷流 IO 哨兵", "mdi-speedometer", [
                         self.__row([
                             self.__switch("io_enabled", "启用 IO 巡检", 3),
                             self.__text("io_interval", "采样间隔(分钟)", 3, "5"),
@@ -433,8 +278,8 @@ class NasSentinel(_PluginBase):
                                      "warning", 12, show="io_enabled"),
                     ]),
 
-                    # ========== ⑤ 自动降级 / 恢复 ==========
-                    self.__card("⑤ 自动降级 / 自动恢复(默认关闭)", "mdi-shield-alert-outline", [
+                    # ========== ③ 自动降级 / 恢复 ==========
+                    self.__card("③ 自动降级 / 自动恢复(默认关闭)", "mdi-shield-alert-outline", [
                         self.__row([
                             self.__switch("auto_downgrade", "超红线自动降下载并发", 6),
                             self.__switch("auto_recover", "恢复后自动升回并发", 6),
@@ -452,12 +297,11 @@ class NasSentinel(_PluginBase):
                                      "作为升回基线。", "warning", 12),
                     ]),
 
-                    # ========== ⑥ 刷流促销守护 ==========
-                    self.__card("⑥ 刷流促销守护(免费期防漏)", "mdi-timer-alert-outline", [
+                    # ========== ④ 刷流促销守护 ==========
+                    self.__card("④ 刷流促销守护(免费期防漏)", "mdi-timer-alert-outline", [
                         self.__row([
-                            self.__switch("promo_check", "启用促销敞口检查", 4),
-                            self.__text("promo_lead_hours", "提前预警小时数", 4, "6"),
-                            self.__text("io_notify_cooldown", "告警冷却(分钟)", 4, "30"),
+                            self.__switch("promo_check", "启用促销敞口检查", 6),
+                            self.__text("promo_lead_hours", "提前预警小时数", 6, "6"),
                         ]),
                         self.__alert("背景:站点的「免费」是限时的(馒头实测有 6h / 12h / 24h 档),"
                                      "而刷流插件抓种时只看「此刻是否免费」,不看「还剩多久」。"
@@ -483,29 +327,6 @@ class NasSentinel(_PluginBase):
                 "debug": False,
                 "quiet_start": "",
                 "quiet_end": "",
-                "http_timeout": 25,
-
-                "signin_enabled": True,
-                "signin_sites": [],
-                "signin_path": "/attendance.php",
-                "signin_cron": "",
-                "signin_retry": 1,
-                "signin_notify": True,
-                "signin_skip_signed": True,
-                "signin_ua": "",
-                "signin_cookie": "",
-                "signin_extra_form": "",
-
-                "exam_enabled": True,
-                "exam_sites": [],
-                "exam_paths": "/rules.php,/",
-                "exam_keyword": "考核",
-                "exam_cron": "",
-                "exam_warn_days": 5,
-                "exam_notify_risk": True,
-                "exam_metrics": "",
-                "exam_site_config": "",
-
                 "io_enabled": True,
                 "io_interval": 5,
                 "io_sample_seconds": 3,
@@ -541,13 +362,8 @@ class NasSentinel(_PluginBase):
     # ---------------------------------------------------------------------
     def get_page(self) -> Optional[List[dict]]:
         last = self.get_data("last_result") or {}
-        exam = last.get("exam") or []
-        signin = last.get("signin") or []
         io = self.get_data("last_io") or last.get("io") or {}
         history = self.get_data("io_history") or []
-
-        exam_text = "\n".join(exam) if exam else "尚未采集,点上方「考核检查」"
-        sign_text = "\n".join(signin) if signin else "尚未采集,点上方「立即签到」"
         if io.get("summary"):
             io_text = "[%s] %s\n%s" % (io.get("time"), io.get("level"), io.get("summary"))
         else:
@@ -588,18 +404,14 @@ class NasSentinel(_PluginBase):
                             self.__btn("测试通知", "mdi-bell-ring", "/test_notify", 3),
                         ]),
                         self.__row([
-                            self.__btn("立即签到", "mdi-calendar-check", "/signin", 3),
-                            self.__btn("考核检查", "mdi-clipboard-check", "/exam", 3),
-                            self.__btn("IO 检查", "mdi-speedometer", "/io", 3),
-                            self.__btn("促销敞口", "mdi-timer-alert-outline", "/promo", 3),
+                            self.__btn("IO 检查", "mdi-speedometer", "/io", 6),
+                            self.__btn("促销敞口", "mdi-timer-alert-outline", "/promo", 6),
                         ]),
-                        self.__alert("「立即巡检」= 签到 + 考核 + IO + 促销敞口一次跑完;"
+                        self.__alert("「立即巡检」= IO + 促销敞口一次跑完;"
                                      "「启用/禁用插件」走 mp 的插件配置用例(保存 + 重新初始化 + 刷新调度),"
                                      "与在插件列表里开关等效;「测试通知」会忽略免打扰时段。"
                                      "结果约 10~20 秒后刷新本页可见。", "info", 12),
                     ]),
-                    self.__card("考核进度", "mdi-clipboard-check", [self.__pane(exam_text)]),
-                    self.__card("签到结果", "mdi-calendar-check", [self.__pane(sign_text)]),
                     self.__card("IO 健康", "mdi-speedometer", [self.__pane(io_text)]),
                     self.__card("刷流促销敞口(免费期防漏)", "mdi-timer-alert-outline",
                                 [self.__pane(promo_text)]),
@@ -623,7 +435,7 @@ class NasSentinel(_PluginBase):
     def api_run(self):
         self.__bg(self.run_daily, manual=True)
         return {"success": True,
-                "message": "已开始巡检(签到 + 考核 + IO),约 10~20 秒后刷新本页查看结果"}
+                "message": "已开始巡检(IO + 促销敞口),约 10~20 秒后刷新本页查看结果"}
 
     def api_io(self):
         self.__bg(self.run_io, manual=True)
@@ -632,14 +444,6 @@ class NasSentinel(_PluginBase):
     def api_promo(self):
         self.__bg(self.run_promo, manual=True)
         return {"success": True, "message": "已开始检查刷流促销敞口,约 5 秒后刷新本页查看结果"}
-
-    def api_signin(self):
-        self.__bg(self.run_signin, manual=True)
-        return {"success": True, "message": "已开始站点签到,约 10 秒后刷新本页查看结果"}
-
-    def api_exam(self):
-        self.__bg(self.run_exam, manual=True)
-        return {"success": True, "message": "已开始考核检查,约 10 秒后刷新本页查看结果"}
 
     def api_enable(self):
         return self.__set_enabled(True)
@@ -682,20 +486,6 @@ class NasSentinel(_PluginBase):
     # =====================================================================
     def run_daily(self, manual: bool = False) -> str:
         logger.info("【NAS哨兵】开始每日巡检")
-        signin, exam = [], []
-        if self._signin_enabled:
-            try:
-                signin = self.__do_signin()
-            except Exception as e:
-                logger.error(f"【NAS哨兵】签到模块异常:{e}")
-                signin = [f"签到模块异常:{e}"]
-        risks: List[str] = []
-        if self._exam_enabled:
-            try:
-                exam = self.__do_exam(risks)
-            except Exception as e:
-                logger.error(f"【NAS哨兵】考核模块异常:{e}")
-                exam = [f"考核模块异常:{e}"]
         io = {}
         try:
             io = self.__sample_io(notify_issue=self._notify_issue and not manual)
@@ -711,12 +501,9 @@ class NasSentinel(_PluginBase):
                 promo = {"summary": f"促销模块异常:{e}", "level": "🔴 异常", "active": 0}
 
         result = {"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                  "signin": signin, "exam": exam, "io": io, "promo": promo}
+                  "io": io, "promo": promo}
         self.save_data("last_result", result)
 
-        # 考核风险:独立告警(与简报解耦)
-        if risks and self._exam_notify_risk:
-            self.__notify_send("NAS 哨兵·考核风险", "\n".join(risks))
         # 促销敞口:只在「已过期却仍在下载」时即时告警
         if promo.get("active") and self._notify_issue and not manual:
             self.__notify_send("NAS 哨兵·刷流促销敞口", promo.get("summary", ""))
@@ -725,37 +512,9 @@ class NasSentinel(_PluginBase):
         if self._notify and self._notify_daily and not manual:
             self.__notify_send("NAS 哨兵·每日简报", self.__build_brief(result))
         if manual:
-            return "巡检完成(签到 %d 项 / 考核 %d 项 / IO:%s / 促销:%s)" % (
-                len(signin), len(exam), io.get("level", "?"), promo.get("level", "未启用"))
+            return "巡检完成(IO:%s / 促销:%s)" % (
+                io.get("level", "?"), promo.get("level", "未启用"))
         return "巡检完成"
-
-    def run_signin(self, manual: bool = False) -> str:
-        if not self._signin_enabled:
-            return "签到模块未启用"
-        try:
-            lines = self.__do_signin()
-        except Exception as e:
-            logger.error(f"【NAS哨兵】签到异常:{e}")
-            return f"签到异常:{e}"
-        if lines:
-            self.save_data("last_signin_only", {"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                                "lines": lines})
-        if self._signin_notify and not manual:
-            self.__notify_send("NAS 哨兵·签到结果", "\n".join(lines) or "无站点需要签到")
-        return "\n".join(lines) if manual else "签到完成"
-
-    def run_exam(self, manual: bool = False) -> str:
-        if not self._exam_enabled:
-            return "考核模块未启用"
-        risks: List[str] = []
-        try:
-            lines = self.__do_exam(risks)
-        except Exception as e:
-            logger.error(f"【NAS哨兵】考核检查异常:{e}")
-            return f"考核检查异常:{e}"
-        if risks and self._exam_notify_risk and not manual:
-            self.__notify_send("NAS 哨兵·考核风险", "\n".join(risks))
-        return "\n".join(lines) if manual else "考核检查完成"
 
     def run_io(self, manual: bool = False) -> str:
         try:
@@ -782,233 +541,7 @@ class NasSentinel(_PluginBase):
         return r.get("summary", "促销敞口检查完成")
 
     # =====================================================================
-    # 模块 1:通用 NexusPHP 签到
-    # =====================================================================
-    def __do_signin(self) -> List[str]:
-        out: List[str] = []
-        if not self._signin_sites:
-            return out
-        for sid in self._signin_sites:
-            site = self.__get_site(sid)
-            if not site:
-                out.append(f"[{sid}] 站点不存在")
-                continue
-            name = getattr(site, "name", str(sid))
-            try:
-                out.append(self.__signin_one(site))
-            except Exception as e:
-                logger.error(f"【NAS哨兵】{name} 签到异常:{e}")
-                out.append(f"{name}: 异常 {e}")
-        return out
-
-    def __signin_one(self, site) -> str:
-        name = getattr(site, "name", "?")
-        base = (getattr(site, "url", "") or "").rstrip("/")
-        cookie = self._signin_cookie or (getattr(site, "cookie", "") or "")
-        ua = self._signin_ua or (getattr(site, "ua", "") or DEFAULT_UA)
-        if not base:
-            return f"{name}: 站点 URL 为空"
-        if not cookie:
-            return f"{name}: 未配置 Cookie,跳过(本插件用 Cookie 签到,不走用户名密码)"
-        url = base + self._signin_path
-        r = self.__http(url, cookie=cookie, ua=ua)
-        if r is None:
-            return f"{name}: 请求失败"
-        if r.status_code != 200:
-            return f"{name}: HTTP {r.status_code}"
-        page = r.text or ""
-        text = self.__text_of(page)
-
-        # 情况 A:页面已显示签到过(覆盖站点多种措辞:签到成功/已连续签到/签到已得 等)
-        if RE_SIGNED.search(text):
-            if self._signin_skip_signed:
-                return f"{name}: 今日已签到(跳过)"
-            return f"{name}: 今日已签到"
-
-        extra = self.__parse_kv(self._signin_extra_form)
-
-        # 情况 B:存在签到表单 -> 按表单提交(POST)
-        form = re.search(r"(?is)<form[^>]*>(.*?)</form>", page)
-        if form:
-            fm = re.search(r'(?is)<form[^>]*action=["\']?([^"\'>\s]+)', page)
-            action = fm.group(1) if fm else self._signin_path
-            inputs = re.findall(r'(?is)<input[^>]*>', form.group(1))
-            data: Dict[str, str] = {}
-            for tag in inputs:
-                n = re.search(r'name=["\']([^"\']+)["\']', tag, re.I)
-                if not n:
-                    continue
-                v = re.search(r'value=["\']([^"\']*)["\']', tag, re.I)
-                data[n.group(1)] = v.group(1) if v else ""
-            data.update(extra)
-            target = action if action.lower().startswith("http") else base + "/" + action.lstrip("/")
-            r2 = self.__http(target, cookie=cookie, ua=ua, method="POST", data=data)
-            if r2 is None:
-                return f"{name}: 表单已提交但无响应(字段:{','.join(data) or '无'})"
-            t2 = self.__text_of(r2.text or "")
-            if re.search(r"(签到成功|成功|已经签到|已签到)", t2):
-                return f"{name}: 签到成功(POST 表单)"
-            return f"{name}: 已提交表单,未见成功字样(HTTP {r2.status_code})"
-
-        # 情况 C:签到链接(GET)
-        link = re.search(r'(?is)<a[^>]+href=["\']([^"\']*?(?:attendance|sign|checkin)[^"\']*)["\'][^>]*>',
-                         page)
-        if link and "attendance.php" not in link.group(1):
-            target = link.group(1)
-            if not target.lower().startswith("http"):
-                target = base + "/" + target.lstrip("/")
-            r3 = self.__http(target, cookie=cookie, ua=ua)
-            t3 = self.__text_of((r3.text if r3 else "") or "")
-            if re.search(r"(签到成功|成功|已签到)", t3):
-                return f"{name}: 签到成功(GET 链接)"
-            return f"{name}: 已请求签到链接,未见成功字样"
-
-        # 情况 D:无法判定 -> 把探测结果报告出来(便于人工确认机制)
-        if extra:
-            # 配了附加表单字段,尝试直接 POST 到签到路径
-            r4 = self.__http(url, cookie=cookie, ua=ua, method="POST", data=extra)
-            t4 = self.__text_of((r4.text if r4 else "") or "")
-            if re.search(r"(签到成功|成功|已经签到|已签到)", t4):
-                return f"{name}: 签到成功(附加字段 POST)"
-            return f"{name}: 已按附加字段 POST,未见成功字样"
-        hint = "页面无表单/无签到链接/无已签到提示"
-        return f"{name}: 未识别签到方式({hint})"
-
-    # =====================================================================
-    # 模块 2:通用 NexusPHP 考核进度
-    # =====================================================================
-    def __do_exam(self, risks: Optional[List[str]] = None) -> List[str]:
-        out: List[str] = []
-        if not self._exam_sites:
-            return out
-        for sid in self._exam_sites:
-            site = self.__get_site(sid)
-            if not site:
-                out.append(f"[{sid}] 站点不存在")
-                continue
-            name = getattr(site, "name", str(sid))
-            try:
-                out.extend(self.__exam_one(site, risks))
-            except Exception as e:
-                logger.error(f"【NAS哨兵】{name} 考核解析异常:{e}")
-                out.append(f"{name}: 考核解析异常 {e}")
-        return out
-
-    def __exam_one(self, site, risks: Optional[List[str]] = None) -> List[str]:
-        name = getattr(site, "name", "?")
-        sid = int(getattr(site, "id", -1))
-        base = (getattr(site, "url", "") or "").rstrip("/")
-        cookie = getattr(site, "cookie", "") or ""
-        ua = getattr(site, "ua", "") or DEFAULT_UA
-
-        # 单点配置:按站点覆盖考核页面与指标目标
-        per = self.__exam_sites_cfg().get(sid) or {}
-        paths = per.get("paths") or self._exam_paths
-
-        page = ""
-        hit_path = ""
-        for path in paths:
-            if not path:
-                continue
-            r = self.__http(base + path, cookie=cookie, ua=ua)
-            if r is not None and r.status_code == 200 and self._exam_keyword in (r.text or ""):
-                page = r.text
-                hit_path = path
-                break
-        if not page:
-            return [f"{name}: 未找到考核信息(试过 {','.join(paths)})"]
-        text = self.__text_of(page)
-        out: List[str] = []
-        head = RE_EXAM_NAME.search(text)
-        tm = RE_EXAM_TIME.search(text)
-        if head or tm:
-            seg = text[max(0, (head.start() if head else 0) - 5): (tm.end() if tm else 0) + 400]
-            items = RE_EXAM_ITEM.findall(seg)
-            title = head.group(1).strip() if head else "考核"
-            out.append(f"【{name}】{title}(来源 {hit_path})")
-            if tm:
-                out.append(f"   期限:{tm.group(1)} ~ {tm.group(2)}")
-            if self._exam_metrics:
-                want = [x.strip() for x in re.split(r"[,、;]", self._exam_metrics) if x.strip()]
-                items = [it for it in items if any(w in it[1] for w in want)] or items
-            for idx, label, req, cur, res in items:
-                flag = "✅" if ("通过" in res and "未" not in res) else "❌"
-                # 单点配置里的目标值优先于页面要求
-                ov = self.__target_for(label, per.get("targets") or {})
-                if ov:
-                    req = ov
-                out.append(f"   {flag} 指标{idx} {label.strip()}:要求 {req.strip()},"
-                           f"当前 {cur.strip()},结果 {res.strip()}")
-            # 进度外推(仅对有单位一致的两项做粗算,失败则跳过)
-            try:
-                eta_lines, risk_lines = self.__exam_eta(tm, items, name)
-                out.extend(eta_lines)
-                if risks is not None:
-                    risks.extend(risk_lines)
-            except Exception as e:
-                logger.debug(f"【NAS哨兵】考核外推失败:{e}")
-            # 单点配置里填了目标但页面没给出对应指标 -> 明确提示
-            for k, v in (per.get("targets") or {}).items():
-                if not any(k in it[1] for it in items):
-                    out.append(f"   🎯 目标 {k} = {v}(该站点页面未提供此指标当前值)")
-            if tm:
-                try:
-                    end = datetime.strptime(tm.group(2), "%Y-%m-%d %H:%M:%S")
-                    left_days = (end - datetime.now()).total_seconds() / 86400
-                    if 0 < left_days <= self._exam_warn_days and not all(
-                            ("通过" in it[4] and "未" not in it[4]) for it in items):
-                        msg = f"【{name}】考核剩余 {left_days:.1f} 天(阈值 {self._exam_warn_days} 天),仍未全部通过"
-                        out.append(f"   ⏰ {msg}")
-                        if risks is not None:
-                            risks.append(msg)
-                except Exception:
-                    pass
-        return out or [f"{name}: 未解析到考核条目"]
-
-    def __exam_eta(self, tm, items, site_name: str = "") -> Tuple[List[str], List[str]]:
-        """基于当前值与已用时间,粗算剩余时间的达成可能性。返回(展示行, 风险行)。"""
-        if not tm or not items:
-            return [], []
-        try:
-            start = datetime.strptime(tm.group(1), "%Y-%m-%d %H:%M:%S")
-            end = datetime.strptime(tm.group(2), "%Y-%m-%d %H:%M:%S")
-        except Exception:
-            return [], []
-        now = datetime.now()
-        used = max((now - start).total_seconds(), 1)
-        left = (end - now).total_seconds()
-        if left <= 0:
-            return ["   ⏰ 考核期已结束"], []
-        lines: List[str] = []
-        risks: List[str] = []
-        for _idx, label, req, cur, _res in items:
-            rv, ru = self.__num(req)
-            cv, cu = self.__num(cur)
-            if rv is None or cv is None:
-                continue
-            # 只处理同量纲或可换算的(此处按原值比较,避免误算)
-            if ru and cu and ru.lower() != cu.lower():
-                continue
-            need = rv - cv
-            if need <= 0:
-                lines.append(f"   ⏳ {label.strip()}:已达标")
-                continue
-            rate = cv / used
-            if rate <= 0:
-                lines.append(f"   ⏳ {label.strip()}:进度为 0,当前速率无法预计")
-                risks.append(f"【{site_name}】{label.strip()}:进度为 0")
-                continue
-            eta = need / rate
-            ok = eta <= left
-            lines.append("   ⏳ %s:按当前速率还需 %.1f 天,剩余 %.1f 天 → %s" % (
-                label.strip(), eta / 86400, left / 86400, "来得及" if ok else "**有风险**"))
-            if not ok:
-                risks.append("【%s】%s:按当前速率还需 %.1f 天 > 剩余 %.1f 天" % (
-                    site_name, label.strip(), eta / 86400, left / 86400))
-        return lines, risks
-
-    # =====================================================================
-    # 模块 3:IO / 刷流健康哨兵
+    # 模块 1:IO / 刷流健康哨兵
     # =====================================================================
     def __sample_io(self, notify_issue: bool = False) -> Dict[str, Any]:
         load1, load5, load15, iowait = self.__load()
@@ -1498,12 +1031,6 @@ class NasSentinel(_PluginBase):
 
     def __build_brief(self, result: Dict[str, Any]) -> str:
         lines = ["巡检时间:%s" % result.get("time", "")]
-        if result.get("signin"):
-            lines.append("— 签到 —")
-            lines.extend(result["signin"])
-        if result.get("exam"):
-            lines.append("— 考核 —")
-            lines.extend(result["exam"])
         io = result.get("io") or {}
         if io:
             lines.append("— IO —")
@@ -1527,130 +1054,11 @@ class NasSentinel(_PluginBase):
             return d
 
     @staticmethod
-    def __as_int_list(v) -> List[int]:
-        out = []
-        for x in (v or []):
-            try:
-                out.append(int(x))
-            except Exception:
-                continue
-        return out
-
-    @staticmethod
-    def __as_str_list(v) -> List[str]:
-        if isinstance(v, list):
-            return [str(x).strip() for x in v if str(x).strip()]
-        return [x.strip() for x in re.split(r"[,，]", str(v or "")) if x.strip()]
-
-    @staticmethod
     def __as_float(v, d: float) -> float:
         try:
             return float(v)
         except Exception:
             return d
-
-    @staticmethod
-    def __parse_kv(text: str) -> Dict[str, str]:
-        out: Dict[str, str] = {}
-        for ln in str(text or "").splitlines():
-            ln = ln.strip()
-            if not ln or ln.startswith("#") or "=" not in ln:
-                continue
-            k, _, v = ln.partition("=")
-            if k.strip():
-                out[k.strip()] = v.strip()
-        return out
-
-    @staticmethod
-    def __to_bytes(v: float, unit: str) -> Optional[float]:
-        f = UNIT_FACTOR.get((unit or "").upper())
-        return v * f if f else None
-
-    @staticmethod
-    def __num(s: str) -> Tuple[Optional[float], Optional[str]]:
-        m = RE_UNIT_NUM.search(s or "")
-        if not m:
-            return None, None
-        return float(m.group(1)), (m.group(2) or "").upper()
-
-    @staticmethod
-    def __text_of(page: str) -> str:
-        t = re.sub(r"(?is)<(script|style).*?</\1>", " ", page or "")
-        t = re.sub(r"(?s)<[^>]+>", " ", t)
-        t = html.unescape(t)
-        return re.sub(r"\s+", " ", t)
-
-    def __http(self, url: str, cookie: str = "", ua: str = DEFAULT_UA, method: str = "GET",
-               data: Optional[Dict[str, str]] = None, timeout: Optional[int] = None):
-        """带重试的请求。重试次数由 signin_retry 控制(0~5)。"""
-        attempts = max(1, int(self._signin_retry) + 1)
-        h = {"User-Agent": ua or DEFAULT_UA}
-        if cookie:
-            h["Cookie"] = cookie
-        for i in range(attempts):
-            try:
-                s = requests.Session()
-                return s.request(method, url, headers=h, data=data,
-                                 timeout=timeout or self._http_timeout, allow_redirects=True)
-            except Exception as e:
-                if i == attempts - 1:
-                    logger.warn(f"【NAS哨兵】请求 {url} 失败(重试 {i} 次):{e}")
-                else:
-                    time.sleep(1.5)
-        return None
-
-    def __get_site(self, site_id: int):
-        try:
-            if SiteOper is None:
-                return None
-            for s in SiteOper().list_order_by_pri():
-                if int(getattr(s, "id", -1)) == int(site_id):
-                    return s
-        except Exception as e:
-            logger.warn(f"【NAS哨兵】查询站点 {site_id} 失败:{e}")
-        return None
-
-    def __exam_sites_cfg(self) -> Dict[int, Dict[str, Any]]:
-        """解析「考核单点配置」。
-
-        每行:`站点ID | 考核页面 | 上传目标 | 做种积分目标 | 分享率目标 | 备注`
-        目标字段支持两种写法:
-          * 位置式(第 3/4/5 个字段):依次对应 上传 / 做种积分 / 分享率
-          * 关键词式(任一字段):`关键词=目标`,如 `上传=83.2GB`、`积分=1200`
-        空字段表示沿用页面上的要求。
-        """
-        POSITIONAL = ["上传", "积分", "分享率"]
-        out: Dict[int, Dict[str, Any]] = {}
-        for raw in str(self._exam_site_config or "").splitlines():
-            ln = raw.strip()
-            if not ln or ln.startswith("#"):
-                continue
-            seg = [x.strip() for x in ln.split("|")]
-            if not seg or not seg[0].isdigit():
-                continue
-            sid = int(seg[0])
-            paths = []
-            if len(seg) > 1 and seg[1]:
-                paths = [x.strip() for x in re.split(r"[,，\s]+", seg[1]) if x.strip()]
-            targets: Dict[str, str] = {}
-            for i, fld in enumerate(seg[2:]):
-                if not fld:
-                    continue
-                if "=" in fld:
-                    k, _, v = fld.partition("=")
-                    if k.strip() and v.strip():
-                        targets[k.strip()] = v.strip()
-                elif i < len(POSITIONAL) and fld:
-                    targets[POSITIONAL[i]] = fld
-            out[sid] = {"paths": paths, "targets": targets}
-        return out
-
-    @staticmethod
-    def __target_for(label: str, targets: Dict[str, str]) -> str:
-        for k, v in (targets or {}).items():
-            if k and k in (label or ""):
-                return v
-        return ""
 
     # ---- 表单小组件(减少重复)-------------------------------------------
     @staticmethod
