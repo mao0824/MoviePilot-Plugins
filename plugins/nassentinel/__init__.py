@@ -80,7 +80,7 @@ class NasSentinel(_PluginBase):
     plugin_name = "NAS 哨兵"
     plugin_desc = "通用哨兵:站点签到补位、考核进度追踪、刷流与磁盘 IO 健康巡检,异常即报。"
     plugin_icon = "sentinel.png"
-    plugin_version = "0.3.3"
+    plugin_version = "0.3.4"
     plugin_author = "Niven"
     author_url = "https://github.com/mao0824"
     plugin_config_prefix = "nassentinel_"
@@ -405,7 +405,7 @@ class NasSentinel(_PluginBase):
                             self.__switch("io_enabled", "启用 IO 巡检", 3),
                             self.__text("io_interval", "采样间隔(分钟)", 3, "5"),
                             self.__text("io_sample_seconds", "采样窗口(秒)", 3, "3"),
-                            self.__text("io_keep", "保留最近采样条数", 3, "20"),
+                            self.__text("io_keep", "保留最近采样条数(288≈24h@5min)", 3, "288"),
                         ]),
                         self.__row([
                             self.__text("io_notify_cooldown", "告警冷却(分钟)", 3, "30"),
@@ -517,7 +517,7 @@ class NasSentinel(_PluginBase):
                 "latency_threshold": 1500,
                 "up_rate_min": 1.0,
                 "io_check_qbt": True,
-                "io_keep": 20,
+                "io_keep": 288,
                 "io_notify_cooldown": 30,
 
                 "promo_check": True,
@@ -554,9 +554,15 @@ class NasSentinel(_PluginBase):
             io_text = "尚未采集,点上方「IO 检查」"
 
         hist_lines = []
+        if io.get("trend"):
+            hist_lines.append("【趋势】%s" % io.get("trend"))
+            hist_lines.append("")
         for h in history[-self._io_keep:]:
-            hist_lines.append("%s  负载 %-5s 上传 %-6s %s" % (
-                h.get("time", ""), h.get("load1", "-"), h.get("up_mbps", "-"), h.get("level", "")))
+            bl = h.get("backlog_gb")
+            hist_lines.append("%s  上传 %-6s 下载 %-7s 负载 %-5s 队列 %-4s 积压 %-8s %s" % (
+                str(h.get("time", ""))[5:16], h.get("up_mbps", "-"), h.get("dl_mbps", "-"),
+                h.get("load1", "-"), h.get("queue", "-"),
+                ("%.0fG" % bl) if isinstance(bl, (int, float)) else "-", h.get("level", "")))
         hist_text = "\n".join(hist_lines) if hist_lines else "暂无历史采样"
 
         promo = self.get_data("last_promo") or last.get("promo") or {}
@@ -1008,9 +1014,9 @@ class NasSentinel(_PluginBase):
         load1, load5, load15, iowait = self.__load()
         devs = self.__disk_rates(float(self._io_sample_seconds))
         if self._io_check_qbt:
-            up_mbps, dl_mbps, qbt_state = self.__qbt_rate()
+            up_mbps, dl_mbps, qbt_state, qbt_stats = self.__qbt_rate()
         else:
-            up_mbps, dl_mbps, qbt_state = None, None, ""
+            up_mbps, dl_mbps, qbt_state, qbt_stats = None, None, "", {}
 
         breached, lines = [], []
         lines.append("负载 %.2f / %.2f / %.2f(1/5/15 分),IO 等待 %.1f%%" % (
@@ -1039,22 +1045,35 @@ class NasSentinel(_PluginBase):
             lines.append("  刷流下载器:上传 %.2f MB/s 下载 %.2f MB/s" % (up_mbps, dl_mbps))
             if up_mbps < self._up_rate_min:
                 breached.append("上传 %.2f MB/s < 下限 %.2f MB/s" % (up_mbps, self._up_rate_min))
+        if qbt_stats:
+            lines.append("  未完成积压 %.1f GB(下载中 %d / 排队 %d / 做种 %d)" % (
+                qbt_stats.get("backlog_gb", 0), qbt_stats.get("dl_count", 0),
+                qbt_stats.get("queued", 0), qbt_stats.get("seeding", 0)))
         if qbt_state:
             lines.append("  种子状态:%s" % qbt_state)
 
         level = "🔴 超红线" if breached else "🟢 正常"
         summary = "%s\n%s" % ("; ".join(breached) if breached else "全部指标正常", "\n".join(lines))
-        result = {"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "level": level,
-                  "breached": bool(breached), "summary": summary,
-                  "load1": load1, "up_mbps": up_mbps, "iowait": round(iowait * 100, 1),
-                  "queue": max([d.get("queue", 0) for d in devs.values()] or [0])}
 
-        # 落盘最近一次 IO 结果 + 历史采样(供页面展示;与是否通知无关)
-        self.save_data("last_io", result)
+        # 落盘历史采样:下载速率 / IO 等待 / 积压都要留,才能判断「换参数后有没有变好」
         hist = self.get_data("io_history") or []
-        hist.append({"time": result["time"], "level": level, "load1": load1,
-                     "up_mbps": up_mbps, "queue": result["queue"]})
-        self.save_data("io_history", hist[-max(self._io_keep, 1):])
+        hist.append({"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "level": level,
+                     "load1": load1, "up_mbps": up_mbps, "dl_mbps": dl_mbps,
+                     "queue": max([d.get("queue", 0) for d in devs.values()] or [0]),
+                     "iowait": round(iowait * 100, 1),
+                     "backlog_gb": (qbt_stats or {}).get("backlog_gb")})
+        hist = hist[-max(self._io_keep, 1):]
+        self.save_data("io_history", hist)
+
+        result = {"time": hist[-1]["time"], "level": level,
+                  "breached": bool(breached), "summary": summary,
+                  "load1": load1, "up_mbps": up_mbps, "dl_mbps": dl_mbps,
+                  "iowait": round(iowait * 100, 1),
+                  "queue": hist[-1]["queue"],
+                  "backlog_gb": (qbt_stats or {}).get("backlog_gb"),
+                  "trend": self.__io_trend(hist)}
+        # 落盘最近一次 IO 结果(供页面展示;与是否通知无关)
+        self.save_data("last_io", result)
 
         # 超红线一律记日志(与通知开关解耦,保证可观测)
         if breached:
@@ -1186,10 +1205,15 @@ class NasSentinel(_PluginBase):
             return None, cfg
 
     def __qbt_rate(self):
+        """返回 (上传 MB/s, 下载 MB/s, 状态分布字符串, 统计 dict)。
+
+        统计 dict 含 backlog_gb(未完成种子的剩余字节合计,衡量积压)、
+        dl_count / queued(并发与排队)、seeding(做种数)——用于「调参 → 比效果」。
+        """
         try:
             s, cfg = self.__qb_session()
             if not s:
-                return None, None, ""
+                return None, None, "", {}
             host = cfg["host"]
             ti = s.get(host + "/api/v2/transfer/info", timeout=30).json()
             up = ti.get("up_info_speed", 0) / 1048576
@@ -1197,10 +1221,41 @@ class NasSentinel(_PluginBase):
             t = s.get(host + "/api/v2/torrents/info", timeout=60).json()
             from collections import Counter
             st = dict(Counter(x.get("state") for x in t))
-            return up, dl, str(st)
+            backlog = 0
+            for x in t:
+                if (x.get("progress") or 0) < 1 and x.get("state") in (
+                        "downloading", "forcedDL", "stalledDL", "metaDL", "queuedDL"):
+                    backlog += (x.get("amount_left") or 0)
+            stats = {"backlog_gb": round(backlog / 1073741824, 1),
+                     "dl_count": st.get("downloading", 0) + st.get("forcedDL", 0),
+                     "queued": st.get("queuedDL", 0),
+                     "seeding": st.get("uploading", 0) + st.get("stalledUP", 0)}
+            return up, dl, str(st), stats
         except Exception as e:
             logger.warn(f"【NAS哨兵】查询刷流下载器失败:{e}")
-            return None, None, ""
+            return None, None, "", {}
+
+    def __io_trend(self, hist: List[dict]) -> str:
+        """把留存窗口内的采样压成一行趋势。
+
+        目的是回答「哪个参数组合最有利于拿上传量」:上传均值/最大、下载均值/最大、
+        队列峰值、积压从多少降到多少 —— 换参数后用这行对比即可。
+        """
+        ups = [h.get("up_mbps") for h in hist if isinstance(h.get("up_mbps"), (int, float))]
+        dls = [h.get("dl_mbps") for h in hist if isinstance(h.get("dl_mbps"), (int, float))]
+        qs = [h.get("queue") for h in hist if isinstance(h.get("queue"), (int, float))]
+        bl = [h.get("backlog_gb") for h in hist if isinstance(h.get("backlog_gb"), (int, float))]
+        if not ups:
+            return "样本不足"
+        out = "近 %d 次(约 %.1fh):上传 均值 %.2f / 最大 %.2f MB/s" % (
+            len(hist), len(hist) * self._io_interval / 60.0, sum(ups) / len(ups), max(ups))
+        if dls:
+            out += ";下载 均值 %.1f / 最大 %.1f MB/s" % (sum(dls) / len(dls), max(dls))
+        if qs:
+            out += ";队列峰值 %d" % max(qs)
+        if bl:
+            out += ";积压 %.0f → %.0f GB" % (bl[0], bl[-1])
+        return out
 
     def __qb_set_concurrency(self, new: int) -> bool:
         """把刷流下载器的 max_active_downloads 设为 new。"""
