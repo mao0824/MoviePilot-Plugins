@@ -56,7 +56,7 @@ class NasSentinel(_PluginBase):
     plugin_name = "NAS 哨兵"
     plugin_desc = "通用哨兵:站点签到补位、考核进度追踪、刷流与磁盘 IO 健康巡检,异常即报。"
     plugin_icon = "sentinel.png"
-    plugin_version = "0.1.0"
+    plugin_version = "0.1.1"
     plugin_author = "Niven"
     author_url = "https://github.com/mao0824"
     plugin_config_prefix = "nassentinel_"
@@ -244,12 +244,13 @@ class NasSentinel(_PluginBase):
         """展示最近一次巡检结果(只读)。"""
         last = self.get_data("last_result") or {}
         exam = last.get("exam") or []
-        io = last.get("io") or {}
+        io = self.get_data("last_io") or last.get("io") or {}
         signin = last.get("signin") or []
 
         exam_text = "\n".join(exam) if exam else "尚未采集"
         sign_text = "\n".join(signin) if signin else "尚未采集"
-        io_text = io.get("summary") or "尚未采集"
+        io_text = ("[%s]\n%s" % (io.get("time"), io.get("summary"))
+                   if io.get("summary") else "尚未采集")
 
         return [
             {
@@ -533,13 +534,21 @@ class NasSentinel(_PluginBase):
                   "breached": bool(breached), "summary": summary,
                   "load1": load1, "up_mbps": up_mbps}
 
+        # 落盘最近一次 IO 结果(供页面展示;与是否通知无关)
+        self.save_data("last_io", result)
+
+        # 超红线一律记日志(与通知开关解耦,保证可观测)
+        if breached:
+            logger.warn(f"【NAS哨兵】IO 超红线:{breached}")
+        else:
+            logger.debug(f"【NAS哨兵】IO 正常:负载 {load1:.2f},上传 {up_mbps}")
+
         # 异常即报(带冷却,避免刷屏)
         if breached and notify_issue and self._notify:
             last = self.get_data("last_issue_ts") or 0
             if time.time() - float(last) > max(self._downgrade_cooldown, 10) * 60:
                 self.save_data("last_issue_ts", time.time())
                 self.__notify_send("NAS 哨兵·异常告警", summary)
-                logger.warn(f"【NAS哨兵】IO 异常:{breached}")
         # 自动降级(默认关闭)
         if breached and self._auto_downgrade and self._enabled:
             try:
