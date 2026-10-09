@@ -80,7 +80,7 @@ class NasSentinel(_PluginBase):
     plugin_name = "NAS 哨兵"
     plugin_desc = "通用哨兵:站点签到补位、考核进度追踪、刷流与磁盘 IO 健康巡检,异常即报。"
     plugin_icon = "sentinel.png"
-    plugin_version = "0.3.1"
+    plugin_version = "0.3.2"
     plugin_author = "Niven"
     author_url = "https://github.com/mao0824"
     plugin_config_prefix = "nassentinel_"
@@ -127,8 +127,9 @@ class NasSentinel(_PluginBase):
     _io_sample_seconds = 3
     _io_devices = ""
     _load_threshold = 8.0
+    _load_check = False
     _queue_threshold = 50
-    _iowait_threshold = 30.0
+    _iowait_threshold = 0.0
     _latency_threshold = 1500.0
     _up_rate_min = 1.0
     _io_check_qbt = True
@@ -189,8 +190,11 @@ class NasSentinel(_PluginBase):
         self._io_sample_seconds = self.__as_int(cfg.get("io_sample_seconds"), 3, 1, 30)
         self._io_devices = (cfg.get("io_devices") or "").strip()
         self._load_threshold = self.__as_float(cfg.get("load_threshold"), 8.0)
+        # 默认不拿负载当告警判据:实测本机负载常态 7.4~9.8(负载含 IO 等待),
+        # 用它告警会持续误报;真正对应「上传被随机 IO 掐死」的是队列 + 上传下限。
+        self._load_check = bool(cfg.get("load_check"))
         self._queue_threshold = self.__as_float(cfg.get("queue_threshold"), 50)
-        self._iowait_threshold = self.__as_float(cfg.get("iowait_threshold"), 30.0)
+        self._iowait_threshold = self.__as_float(cfg.get("iowait_threshold"), 0.0)
         self._latency_threshold = self.__as_float(cfg.get("latency_threshold"), 1500.0)
         self._up_rate_min = self.__as_float(cfg.get("up_rate_min"), 1.0)
         self._io_check_qbt = cfg.get("io_check_qbt", True)
@@ -404,17 +408,23 @@ class NasSentinel(_PluginBase):
                             self.__text("io_devices", "监控设备(逗号分隔,留空=自动)", 3, "如:sda,sata1"),
                         ], show="io_enabled"),
                         self.__row([
-                            self.__text("load_threshold", "负载红线", 3, "8"),
-                            self.__text("queue_threshold", "磁盘队列红线", 3, "50"),
-                            self.__text("iowait_threshold", "IO 等待红线(%)", 3, "30"),
-                            self.__text("up_rate_min", "上传速率下限(MB/s)", 3, "1.0"),
+                            self.__text("queue_threshold", "磁盘队列红线(告警判据)", 3, "50"),
+                            self.__text("up_rate_min", "上传速率下限 MB/s(告警判据)", 3, "1.0"),
+                            self.__text("load_threshold", "负载红线(仅记录)", 3, "8"),
+                            self.__text("iowait_threshold", "IO 等待红线 %,0=不告警", 3, "0"),
                         ], show="io_enabled"),
                         self.__row([
-                            self.__text("latency_threshold", "写延迟参考红线(ms,0=不检查)", 12, "1500"),
+                            self.__switch("load_check", "负载也参与告警(默认关)", 4),
+                            self.__text("latency_threshold", "写延迟参考红线(ms,0=不检查)", 8, "1500"),
                         ], show="io_enabled"),
+                        self.__alert("告警判据只保留「磁盘队列」与「上传速率下限」:本机负载含 IO 等待,"
+                                     "实测常态就在 7.4~9.8,用负载判据会持续误报;而队列突发到 100+ 时"
+                                     "上传会瞬间掉到 0 附近 —— 那才是「上传被随机 IO 掐死」的真信号。"
+                                     "负载与 IO 等待仍会照常记录在结果里,需要时可打开上面的开关。",
+                                     "info", 12, show="io_enabled"),
                         self.__alert("写延迟在写缓存 flush 突发时会飙到上千毫秒而队列仍很小,"
-                                     "属于正常现象,因此默认阈值放得很宽(1500ms)或置 0 关闭;"
-                                     "判据以「磁盘队列 + 负载」为主。", "warning", 12, show="io_enabled"),
+                                     "属于正常现象,因此默认阈值放得很宽(1500ms)或置 0 关闭。",
+                                     "warning", 12, show="io_enabled"),
                     ]),
 
                     # ========== ⑤ 自动降级 / 恢复 ==========
@@ -477,8 +487,9 @@ class NasSentinel(_PluginBase):
                 "io_sample_seconds": 3,
                 "io_devices": "",
                 "load_threshold": 8,
+                "load_check": False,
                 "queue_threshold": 50,
-                "iowait_threshold": 30,
+                "iowait_threshold": 0,
                 "latency_threshold": 1500,
                 "up_rate_min": 1.0,
                 "io_check_qbt": True,
@@ -939,9 +950,10 @@ class NasSentinel(_PluginBase):
         breached, lines = [], []
         lines.append("负载 %.2f / %.2f / %.2f(1/5/15 分),IO 等待 %.1f%%" % (
             load1, load5, load15, iowait * 100))
-        if load1 > self._load_threshold:
+        # 负载/IO 等待默认只记录不告警(见 init_plugin 说明):想启用就把开关打开
+        if self._load_check and load1 > self._load_threshold:
             breached.append("负载 %.2f > 红线 %.2f" % (load1, self._load_threshold))
-        if iowait * 100 > self._iowait_threshold:
+        if self._iowait_threshold > 0 and iowait * 100 > self._iowait_threshold:
             breached.append("IO 等待 %.1f%% > 红线 %.1f%%" % (iowait * 100, self._iowait_threshold))
 
         if devs:
