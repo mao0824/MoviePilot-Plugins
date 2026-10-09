@@ -80,7 +80,7 @@ class NasSentinel(_PluginBase):
     plugin_name = "NAS 哨兵"
     plugin_desc = "通用哨兵:站点签到补位、考核进度追踪、刷流与磁盘 IO 健康巡检,异常即报。"
     plugin_icon = "sentinel.png"
-    plugin_version = "0.3.2"
+    plugin_version = "0.3.3"
     plugin_author = "Niven"
     author_url = "https://github.com/mao0824"
     plugin_config_prefix = "nassentinel_"
@@ -201,6 +201,10 @@ class NasSentinel(_PluginBase):
         self._io_keep = self.__as_int(cfg.get("io_keep"), 20, 1, 500)
         self._io_notify_cooldown = self.__as_int(cfg.get("io_notify_cooldown"), 30, 1, 1440)
 
+        # 刷流促销守护:站点「免费」是限时的,排队久了会在免费期结束后才开跑 -> 计下载量
+        self._promo_check = cfg.get("promo_check", True)
+        self._promo_lead_hours = self.__as_float(cfg.get("promo_lead_hours"), 6.0)
+
         # 降级 / 恢复
         self._auto_downgrade = bool(cfg.get("auto_downgrade"))  # 默认关闭
         self._downgrade_step = self.__as_int(cfg.get("downgrade_step"), 1, 1, 50)
@@ -278,6 +282,8 @@ class NasSentinel(_PluginBase):
              "auth": "bear", "summary": "立即执行一次完整巡检(签到+考核+IO)"},
             {"path": "/io", "endpoint": self.api_io, "methods": ["GET", "POST"],
              "auth": "bear", "summary": "立即执行一次 IO 巡检"},
+            {"path": "/promo", "endpoint": self.api_promo, "methods": ["GET", "POST"],
+             "auth": "bear", "summary": "立即检查刷流种子的免费期敞口"},
             {"path": "/signin", "endpoint": self.api_signin, "methods": ["GET", "POST"],
              "auth": "bear", "summary": "立即执行一次站点签到"},
             {"path": "/exam", "endpoint": self.api_exam, "methods": ["GET", "POST"],
@@ -445,6 +451,24 @@ class NasSentinel(_PluginBase):
                         self.__alert("会自动修改刷流下载器的并发上限。默认关闭;首次降级时记下当时并发"
                                      "作为升回基线。", "warning", 12),
                     ]),
+
+                    # ========== ⑥ 刷流促销守护 ==========
+                    self.__card("⑥ 刷流促销守护(免费期防漏)", "mdi-timer-alert-outline", [
+                        self.__row([
+                            self.__switch("promo_check", "启用促销敞口检查", 4),
+                            self.__text("promo_lead_hours", "提前预警小时数", 4, "6"),
+                            self.__text("io_notify_cooldown", "告警冷却(分钟)", 4, "30"),
+                        ]),
+                        self.__alert("背景:站点的「免费」是限时的(馒头实测有 6h / 12h / 24h 档),"
+                                     "而刷流插件抓种时只看「此刻是否免费」,不看「还剩多久」。"
+                                     "两个刷流任务共用一个下载器时,任务级并发之和常超过下载器实际"
+                                     "放行数 → 种子排队数小时,等它真开跑时免费期可能已结束,"
+                                     "那部分下载量会被站点计费。本模块只读刷流插件逐种子记录的"
+                                     "促销截止时间,每天巡检时报出「已过期却未下完」与「即将过期却"
+                                     "未下完」的种子;发现前者会单独发一条告警。只读,不会改动任何种子。"
+                                     "根治手段是在刷流任务里打开「促销过期即删未下完的种子」选项。",
+                                     "info", 12, show="promo_check"),
+                    ]),
                 ],
             },
             {
@@ -496,6 +520,9 @@ class NasSentinel(_PluginBase):
                 "io_keep": 20,
                 "io_notify_cooldown": 30,
 
+                "promo_check": True,
+                "promo_lead_hours": 6,
+
                 "auto_downgrade": False,
                 "downgrade_step": 1,
                 "downgrade_min": 2,
@@ -532,6 +559,13 @@ class NasSentinel(_PluginBase):
                 h.get("time", ""), h.get("load1", "-"), h.get("up_mbps", "-"), h.get("level", "")))
         hist_text = "\n".join(hist_lines) if hist_lines else "暂无历史采样"
 
+        promo = self.get_data("last_promo") or last.get("promo") or {}
+        if promo.get("summary"):
+            promo_text = "[%s] %s\n%s" % (
+                promo.get("time"), promo.get("level"), promo.get("summary"))
+        else:
+            promo_text = "尚未采集,点上方「促销敞口」"
+
         state = "✅ 已启用" if self._enabled else "⛔ 已禁用"
         return [
             {
@@ -548,11 +582,12 @@ class NasSentinel(_PluginBase):
                             self.__btn("测试通知", "mdi-bell-ring", "/test_notify", 3),
                         ]),
                         self.__row([
-                            self.__btn("立即签到", "mdi-calendar-check", "/signin", 4),
-                            self.__btn("考核检查", "mdi-clipboard-check", "/exam", 4),
-                            self.__btn("IO 检查", "mdi-speedometer", "/io", 4),
+                            self.__btn("立即签到", "mdi-calendar-check", "/signin", 3),
+                            self.__btn("考核检查", "mdi-clipboard-check", "/exam", 3),
+                            self.__btn("IO 检查", "mdi-speedometer", "/io", 3),
+                            self.__btn("促销敞口", "mdi-timer-alert-outline", "/promo", 3),
                         ]),
-                        self.__alert("「立即巡检」= 签到 + 考核 + IO 一次跑完;"
+                        self.__alert("「立即巡检」= 签到 + 考核 + IO + 促销敞口一次跑完;"
                                      "「启用/禁用插件」走 mp 的插件配置用例(保存 + 重新初始化 + 刷新调度),"
                                      "与在插件列表里开关等效;「测试通知」会忽略免打扰时段。"
                                      "结果约 10~20 秒后刷新本页可见。", "info", 12),
@@ -560,6 +595,8 @@ class NasSentinel(_PluginBase):
                     self.__card("考核进度", "mdi-clipboard-check", [self.__pane(exam_text)]),
                     self.__card("签到结果", "mdi-calendar-check", [self.__pane(sign_text)]),
                     self.__card("IO 健康", "mdi-speedometer", [self.__pane(io_text)]),
+                    self.__card("刷流促销敞口(免费期防漏)", "mdi-timer-alert-outline",
+                                [self.__pane(promo_text)]),
                     self.__card("IO 历史采样(最近 %d 次)" % self._io_keep, "mdi-chart-line",
                                 [self.__pane(hist_text)]),
                 ],
@@ -585,6 +622,10 @@ class NasSentinel(_PluginBase):
     def api_io(self):
         self.__bg(self.run_io, manual=True)
         return {"success": True, "message": "已开始 IO 巡检,约 10 秒后刷新本页查看结果"}
+
+    def api_promo(self):
+        self.__bg(self.run_promo, manual=True)
+        return {"success": True, "message": "已开始检查刷流促销敞口,约 5 秒后刷新本页查看结果"}
 
     def api_signin(self):
         self.__bg(self.run_signin, manual=True)
@@ -655,21 +696,31 @@ class NasSentinel(_PluginBase):
         except Exception as e:
             logger.error(f"【NAS哨兵】IO 模块异常:{e}")
             io = {"summary": f"IO 模块异常:{e}", "level": "🔴 异常", "breached": False}
+        promo = {}
+        if self._promo_check:
+            try:
+                promo = self.__promo_exposure()
+            except Exception as e:
+                logger.error(f"【NAS哨兵】促销模块异常:{e}")
+                promo = {"summary": f"促销模块异常:{e}", "level": "🔴 异常", "active": 0}
 
         result = {"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                  "signin": signin, "exam": exam, "io": io}
+                  "signin": signin, "exam": exam, "io": io, "promo": promo}
         self.save_data("last_result", result)
 
         # 考核风险:独立告警(与简报解耦)
         if risks and self._exam_notify_risk:
             self.__notify_send("NAS 哨兵·考核风险", "\n".join(risks))
+        # 促销敞口:只在「已过期却仍在下载」时即时告警
+        if promo.get("active") and self._notify_issue and not manual:
+            self.__notify_send("NAS 哨兵·刷流促销敞口", promo.get("summary", ""))
 
         # 每日简报:仅在开启且非手动时发送
         if self._notify and self._notify_daily and not manual:
             self.__notify_send("NAS 哨兵·每日简报", self.__build_brief(result))
         if manual:
-            return "巡检完成(签到 %d 项 / 考核 %d 项 / IO:%s)" % (
-                len(signin), len(exam), io.get("level", "?"))
+            return "巡检完成(签到 %d 项 / 考核 %d 项 / IO:%s / 促销:%s)" % (
+                len(signin), len(exam), io.get("level", "?"), promo.get("level", "未启用"))
         return "巡检完成"
 
     def run_signin(self, manual: bool = False) -> str:
@@ -709,6 +760,20 @@ class NasSentinel(_PluginBase):
         if manual:
             return io.get("summary", "IO 巡检完成")
         return "IO 巡检完成"
+
+    def run_promo(self, manual: bool = False) -> str:
+        """检查刷流种子的免费期敞口(只读,不改任何种子)。"""
+        if not self._promo_check:
+            return "促销守护未启用"
+        try:
+            r = self.__promo_exposure()
+        except Exception as e:
+            logger.error(f"【NAS哨兵】促销敞口检查异常:{e}")
+            return f"促销敞口检查异常:{e}"
+        # 有「已过期却仍在下载」的才即时告警(每日简报里也会带一份)
+        if r.get("active") and self._notify_issue and not manual:
+            self.__notify_send("NAS 哨兵·刷流促销敞口", r.get("summary", ""))
+        return r.get("summary", "促销敞口检查完成")
 
     # =====================================================================
     # 模块 1:通用 NexusPHP 签到
@@ -1161,6 +1226,135 @@ class NasSentinel(_PluginBase):
         except Exception:
             return None
 
+    # =====================================================================
+    # 刷流促销守护:找出「免费期已过 / 即将过期,却还没下完」的刷流种子
+    #
+    # 背景(2026-10-10 实测):馒头等站点的「免费」是限时的,实测有 6h / 12h / 24h
+    # 三档;而 BrushFlow 抓种时只看「此刻是否免费」,不看「还剩多久」。两个刷流任务
+    # 共用一个下载器时,任务级并发之和会超过下载器实际放行数 -> 种子排队几小时,
+    # 等它真正开跑时免费期可能已经结束,那部分下载量就会被站点计费。
+    #
+    # 数据来源:BrushFlow 把每个种子的 freedate(站点促销截止)记在 mp 自己的
+    # /config/user.db 的 plugindata 表(key 形如 task.<任务id>.torrents)。本模块
+    # 只读它,不依赖 BrushFlow 的私有方法;读不到就降级为「无数据」,不影响其它模块。
+    # =====================================================================
+    @staticmethod
+    def __parse_site_dt(v) -> Optional[datetime]:
+        """解析站点返回的时间字符串(形如 2026-10-10 11:07:59)。"""
+        try:
+            return datetime.strptime(str(v).strip().replace("T", " ")[:19], "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return None
+
+    def __brushflow_records(self) -> List[Tuple[str, dict]]:
+        """读取 BrushFlow 逐种子记录(含 freedate / size / downloaded / deleted)。"""
+        out: List[Tuple[str, dict]] = []
+        try:
+            import json as _json
+            import sqlite3
+            conn = sqlite3.connect("/config/user.db")
+            try:
+                rows = conn.execute(
+                    "SELECT value FROM plugindata "
+                    "WHERE plugin_id='BrushFlow' AND key LIKE 'task.%.torrents'").fetchall()
+            finally:
+                conn.close()
+            for row in rows:
+                try:
+                    data = _json.loads(row[0] or "{}")
+                except Exception:
+                    continue
+                if not isinstance(data, dict):
+                    continue
+                for h, v in data.items():
+                    if isinstance(v, dict):
+                        out.append((h, v))
+        except Exception as e:
+            logger.warn(f"【NAS哨兵】读取刷流促销数据失败(将跳过本模块):{e}")
+        return out
+
+    def __promo_exposure(self) -> Dict[str, Any]:
+        """统计刷流种子的促销敞口:已过期未下完 / 临近过期未下完。"""
+        now = datetime.now()
+        expired: List[dict] = []
+        soon: List[dict] = []
+        no_date = 0
+        for h, v in self.__brushflow_records():
+            if v.get("deleted"):
+                continue
+            try:
+                size = float(v.get("size") or 0)
+                done = float(v.get("downloaded") or 0)
+            except (TypeError, ValueError):
+                continue
+            # 已下完的只做种,不再产生下载量 -> 不是敞口
+            if size <= 0 or done >= size:
+                continue
+            exp = self.__parse_site_dt(v.get("freedate"))
+            if not exp:
+                no_date += 1
+                continue
+            left = (exp - now).total_seconds() / 3600.0
+            item = {"hash": h, "title": str(v.get("title") or "")[:58],
+                    "size_gb": round(size / 1073741824, 1),
+                    "done_gb": round(done / 1073741824, 1),
+                    "expire": exp.strftime("%m-%d %H:%M"), "left_h": round(left, 1)}
+            if left <= 0:
+                expired.append(item)
+            elif left <= self._promo_lead_hours:
+                soon.append(item)
+
+        # 与下载器对账:区分「还在下载组(真在计费)」与「已停止 / 已不在下载器」
+        states: Dict[str, dict] = {}
+        if expired or soon:
+            s, cfg = self.__qb_session()
+            if s:
+                try:
+                    for x in s.get(cfg["host"] + "/api/v2/torrents/info", timeout=60).json():
+                        states[x.get("hash")] = x
+                except Exception as e:
+                    logger.debug(f"【NAS哨兵】促销敞口对账下载器失败:{e}")
+        LIVE = ("downloading", "forcedDL", "stalledDL", "metaDL", "queuedDL", "checkingDL")
+        for it in expired + soon:
+            t = states.get(it["hash"])
+            it["state"] = (t or {}).get("state") or "已不在下载器"
+            it["active"] = it["state"] in LIVE
+
+        expired.sort(key=lambda x: -x["size_gb"])
+        soon.sort(key=lambda x: x["left_h"])
+        danger = [x for x in expired if x["active"]]
+
+        lines: List[str] = []
+        if expired:
+            lines.append("⚠ 免费期已过但未下完:%d 个(其中仍在下载组 %d 个 <- 这部分正在被计下载量)"
+                         % (len(expired), len(danger)))
+            for x in expired[:6]:
+                lines.append("   [过期 %s] %s %.1fG(已下 %.1fG)%s" % (
+                    x["expire"], x["title"], x["size_gb"], x["done_gb"],
+                    " ← 仍在下载" if x["active"] else " (已停止/已不在下载器)"))
+        if soon:
+            lines.append("⏳ %.0f 小时内到期但未下完:%d 个" % (self._promo_lead_hours, len(soon)))
+            for x in soon[:6]:
+                lines.append("   [剩 %.1fh] %s %.1fG(已下 %.1fG)%s" % (
+                    x["left_h"], x["title"], x["size_gb"], x["done_gb"],
+                    " ← 在下载组(可能来不及)" if x["active"] else ""))
+        if not expired and not soon:
+            lines.append("✅ 没有「已过期/临近过期却未下完」的刷流种子")
+        if no_date:
+            lines.append("(另有 %d 个未下完种子没有 freedate 记录,无法判断,已跳过)" % no_date)
+
+        level = ("🔴 有敞口" if danger else
+                 ("🟠 已过期(未在跑)" if expired else ("🟡 临近到期" if soon else "🟢 正常")))
+        result = {"time": now.strftime("%Y-%m-%d %H:%M:%S"), "level": level,
+                  "expired": len(expired), "active": len(danger), "soon": len(soon),
+                  "no_date": no_date, "summary": "\n".join(lines)}
+        self.save_data("last_promo", result)
+        if danger:
+            logger.warn(f"【NAS哨兵】刷流促销敞口:{len(danger)} 个免费期已过却仍在下载")
+        else:
+            logger.debug(f"【NAS哨兵】促销敞口:{level},过期 {len(expired)} / 临近 {len(soon)}")
+        return result
+
     def __auto_downgrade(self, breached: List[str]):
         """超红线时把下载并发降一档(带冷却)。默认关闭,需用户在页面上显式开启。"""
         last = float(self.get_data("last_downgrade_ts") or 0)
@@ -1259,6 +1453,10 @@ class NasSentinel(_PluginBase):
         if io:
             lines.append("— IO —")
             lines.append(io.get("summary", ""))
+        promo = result.get("promo") or {}
+        if promo:
+            lines.append("— 刷流促销 —")
+            lines.append(promo.get("summary", ""))
         return "\n".join(lines)
 
     # ---- 解析工具 ---------------------------------------------------------
