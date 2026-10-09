@@ -25,7 +25,10 @@ from app.plugins import _PluginBase
 # ---- 可选依赖:尽量不让插件因 mp 版本差异而加载失败 -------------------------
 try:
     from app.schemas.types import MessageType
-    _MSG_TYPE = getattr(MessageType, "Notification", None)
+    # 注意:MessageType 没有 Notification 成员(只有 Download/Organize/Subscribe/
+    # SiteMessage/MediaServer/Manual/Plugin/Agent/Other),插件消息用 Plugin。
+    # 传 None 会导致「邮箱通知」等渠道插件报 'NoneType' object has no attribute 'value'。
+    _MSG_TYPE = getattr(MessageType, "Plugin", None)
 except Exception:  # pragma: no cover
     _MSG_TYPE = None
 
@@ -47,7 +50,8 @@ RE_EXAM_ITEM = re.compile(
     r"当前\s*：\s*([^,，]{1,24})\s*[,，]\s*结果\s*：\s*([^！!]{1,12})[！!]?"
 )
 RE_EXAM_NAME = re.compile(r"名称\s*：\s*([^时]{1,40}?)\s*时间\s*：")
-RE_SIGNED = re.compile(r"(已经签到|已签到|今日已签到|签到成功)")
+RE_SIGNED = re.compile(
+    r"(已经签到|今日已签到|已签到|签到成功|已连续签到|签到已得|本次签到获得|补签卡)")
 RE_UNIT_NUM = re.compile(r"([\d.]+)\s*([KMGTP]?B)?", re.I)
 
 
@@ -56,7 +60,7 @@ class NasSentinel(_PluginBase):
     plugin_name = "NAS 哨兵"
     plugin_desc = "通用哨兵:站点签到补位、考核进度追踪、刷流与磁盘 IO 健康巡检,异常即报。"
     plugin_icon = "sentinel.png"
-    plugin_version = "0.1.1"
+    plugin_version = "0.1.2"
     plugin_author = "Niven"
     author_url = "https://github.com/mao0824"
     plugin_config_prefix = "nassentinel_"
@@ -364,8 +368,8 @@ class NasSentinel(_PluginBase):
         page = r.text or ""
         text = self.__text_of(page)
 
-        # 情况 A:页面已显示签到过
-        if re.search(r"(已经签到|今日已签到|已签到)", text):
+        # 情况 A:页面已显示签到过(覆盖站点多种措辞:签到成功/已连续签到/签到已得 等)
+        if RE_SIGNED.search(text):
             return f"{name}: 今日已签到(跳过)"
 
         # 情况 B:存在签到表单 -> 按表单提交(POST)

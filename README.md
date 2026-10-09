@@ -6,7 +6,7 @@
 
 | 插件 | 版本 | 说明 |
 |---|---|---|
-| [NAS 哨兵](plugins/nassentinel) `NasSentinel` | v0.1.1 | 通用巡检哨兵:站点签到补位、NexusPHP 考核进度追踪、刷流与磁盘 IO 健康巡检,每日简报 + 异常即报 |
+| [NAS 哨兵](plugins/nassentinel) `NasSentinel` | v0.1.2 | 通用巡检哨兵:站点签到补位、NexusPHP 考核进度追踪、刷流与磁盘 IO 健康巡检,每日简报 + 异常即报 |
 
 ## 安装
 
