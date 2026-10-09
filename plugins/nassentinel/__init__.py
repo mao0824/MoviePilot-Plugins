@@ -80,7 +80,7 @@ class NasSentinel(_PluginBase):
     plugin_name = "NAS 哨兵"
     plugin_desc = "通用哨兵:站点签到补位、考核进度追踪、刷流与磁盘 IO 健康巡检,异常即报。"
     plugin_icon = "sentinel.png"
-    plugin_version = "0.3.0"
+    plugin_version = "0.3.1"
     plugin_author = "Niven"
     author_url = "https://github.com/mao0824"
     plugin_config_prefix = "nassentinel_"
@@ -278,6 +278,12 @@ class NasSentinel(_PluginBase):
              "auth": "bear", "summary": "立即执行一次站点签到"},
             {"path": "/exam", "endpoint": self.api_exam, "methods": ["GET", "POST"],
              "auth": "bear", "summary": "立即执行一次考核进度检查"},
+            {"path": "/enable", "endpoint": self.api_enable, "methods": ["GET", "POST"],
+             "auth": "bear", "summary": "启用本插件(等效于插件列表开关)"},
+            {"path": "/disable", "endpoint": self.api_disable, "methods": ["GET", "POST"],
+             "auth": "bear", "summary": "禁用本插件(等效于插件列表开关)"},
+            {"path": "/test_notify", "endpoint": self.api_test_notify, "methods": ["GET", "POST"],
+             "auth": "bear", "summary": "发送一条测试通知(忽略免打扰时段)"},
         ]
 
     # ---------------------------------------------------------------------
@@ -300,126 +306,135 @@ class NasSentinel(_PluginBase):
             {
                 "component": "VForm",
                 "content": [
-                    # ========== ① 通用 ==========
-                    self.__section("① 通用"),
+                    # ========== 顶部快捷区(与 mp 其他插件的三连开关一致)==========
                     self.__row([
                         self.__switch("enabled", "启用插件", 3),
+                        self.__switch("run_once", "保存后立即运行一次", 3),
                         self.__switch("notify", "启用通知", 3),
                         self.__switch("notify_daily", "每日简报", 3),
-                        self.__switch("notify_issue", "异常即报", 3),
                     ]),
-                    self.__row([
-                        self.__cron("cron", "每日巡检周期(cron)", 4, "30 8 * * *"),
-                        self.__select("notify_channel", "通知渠道", 4, chan_opts, multiple=False),
-                        self.__switch("run_once", "保存后立即运行一次", 4),
+                    self.__alert("本页是「配置」。可点按钮(启用/禁用插件、立即巡检、测试通知)在"
+                                 "插件列表里本插件的「数据」页 —— 配置表单渲染器不绑定点击事件,"
+                                 "放在这里点了没反应,故统一放到数据页。", "info", 12),
+
+                    # ========== ① 通用 ==========
+                    self.__card("① 通用", "mdi-tune", [
+                        self.__row([
+                            self.__cron("cron", "每日巡检周期(cron)", 4, "30 8 * * *"),
+                            self.__select("notify_channel", "通知渠道", 4, chan_opts, multiple=False),
+                            self.__switch("notify_issue", "异常即报", 4),
+                        ]),
+                        self.__row([
+                            self.__text("quiet_start", "免打扰开始(HH:MM)", 3, "如 23:30,留空=不启用"),
+                            self.__text("quiet_end", "免打扰结束(HH:MM)", 3, "如 07:00"),
+                            self.__text("http_timeout", "请求超时(秒)", 3, "25"),
+                            self.__switch("debug", "详细日志", 3),
+                        ]),
+                        self.__alert("合上这两个开关看效果:下面各分组里,只有「已启用」的模块才会"
+                                     "展开其详细参数(条件显隐由 MP 的 v-show 合并默认值机制保证安全)。",
+                                     "info", 12),
                     ]),
-                    self.__row([
-                        self.__text("quiet_start", "免打扰开始(HH:MM)", 3, "如 23:30,留空=不启用"),
-                        self.__text("quiet_end", "免打扰结束(HH:MM)", 3, "如 07:00"),
-                        self.__text("http_timeout", "请求超时(秒)", 2, "25"),
-                        self.__switch("debug", "详细日志", 2),
-                        self.__switch("io_enabled", "启用 IO 巡检", 2),
-                    ]),
-                    self.__alert("勾选「保存后立即运行一次」会在保存配置后立刻后台跑一次完整巡检,"
-                                 "不会改变开关状态;免打扰时段内不推送消息(仍会写日志)。", "info", 12),
 
                     # ========== ② 站点签到 ==========
-                    {"component": "VDivider", "props": {"class": "my-4"}},
-                    self.__section("② 站点签到(NexusPHP 通用)"),
-                    self.__row([
-                        self.__switch("signin_enabled", "启用签到", 3),
-                        self.__switch("signin_notify", "签到结果通知", 3),
-                        self.__switch("signin_skip_signed", "已签到则跳过", 3),
-                        self.__text("signin_retry", "失败重试次数", 3, "1"),
-                    ]),
-                    self.__row([
-                        self.__select("signin_sites", "需要签到的站点", 8, site_opts),
-                        self.__text("signin_path", "签到相对路径", 4, "/attendance.php"),
-                    ]),
-                    self.__row([
-                        self.__cron("signin_cron", "独立签到周期(留空=并入侵检)", 4, "0 9 * * *"),
-                        self.__text("signin_ua", "自定义 UA(留空=用站点 UA)", 4, ""),
-                        self.__text("signin_cookie", "自定义 Cookie(留空=用站点 Cookie)", 4, ""),
-                    ]),
-                    self.__row([
-                        self.__textarea("signin_extra_form", "附加表单字段", 12, 4,
-                                        "每行一个 k=v,POST 时并入资表单(个别站点需要固定附加参数时用)\n"
-                                        "例:type=signin"),
+                    self.__card("② 站点签到(NexusPHP 通用)", "mdi-calendar-check", [
+                        self.__row([
+                            self.__switch("signin_enabled", "启用签到", 3),
+                            self.__switch("signin_notify", "签到结果通知", 3),
+                            self.__switch("signin_skip_signed", "已签到则跳过", 3),
+                            self.__text("signin_retry", "失败重试次数", 3, "1"),
+                        ]),
+                        self.__row([
+                            self.__select("signin_sites", "需要签到的站点", 8, site_opts),
+                            self.__text("signin_path", "签到相对路径", 4, "/attendance.php"),
+                        ], show="signin_enabled"),
+                        self.__row([
+                            self.__cron("signin_cron", "独立签到周期(留空=并入侵检)", 4, "0 9 * * *"),
+                            self.__text("signin_ua", "自定义 UA(留空=用站点 UA)", 4, ""),
+                            self.__text("signin_cookie", "自定义 Cookie(留空=用站点 Cookie)", 4, ""),
+                        ], show="signin_enabled"),
+                        self.__row([
+                            self.__textarea("signin_extra_form", "附加表单字段", 12, 4,
+                                            "每行一个 k=v,POST 时并入表单(个别站点需要固定附加参数时用)\n"
+                                            "例:type=signin"),
+                        ], show="signin_enabled"),
                     ]),
 
                     # ========== ③ 考核追踪 ==========
-                    {"component": "VDivider", "props": {"class": "my-4"}},
-                    self.__section("③ 考核进度追踪(NexusPHP 通用)"),
-                    self.__row([
-                        self.__switch("exam_enabled", "启用考核追踪", 3),
-                        self.__switch("exam_notify_risk", "有风险立即通知", 3),
-                        self.__text("exam_warn_days", "剩余天数告警阈值", 3, "5"),
-                        self.__text("exam_metrics", "重点关注指标(逗号分隔,留空=全部)", 3, "上传,积分"),
+                    self.__card("③ 考核进度追踪(NexusPHP 通用)", "mdi-clipboard-check", [
+                        self.__row([
+                            self.__switch("exam_enabled", "启用考核追踪", 3),
+                            self.__switch("exam_notify_risk", "有风险立即通知", 3),
+                            self.__text("exam_warn_days", "剩余天数告警阈值", 3, "5"),
+                            self.__text("exam_metrics", "重点关注指标(逗号分隔,留空=全部)", 3, "上传,积分"),
+                        ]),
+                        self.__row([
+                            self.__select("exam_sites", "需要追踪考核的站点", 6, site_opts),
+                            self.__text("exam_paths", "考核页面路径(逗号分隔)", 3, "/rules.php,/"),
+                            self.__text("exam_keyword", "识别关键词", 3, "考核"),
+                        ], show="exam_enabled"),
+                        self.__row([
+                            self.__cron("exam_cron", "独立考核检查周期(留空=并入侵检)", 12, "35 8 * * *"),
+                        ], show="exam_enabled"),
+                        self.__row([
+                            self.__textarea("exam_site_config", "考核单点配置(按站覆盖)", 12, 6,
+                                            "每行一条,字段用 | 分隔:# 开头为注释\n"
+                                            "站点ID | 考核页面 | 上传目标 | 做种积分目标 | 分享率目标 | 备注\n"
+                                            "目标也支持 关键词=目标 写法,如:上传=83.2GB;积分=1200;分享率=1.05\n"
+                                            "示例:\n4 | /rules.php | 83.2GB | 0 | 0 | PTS 新手考核\n"
+                                            "3 | | 300GB | | 1.2 | 填写空白字段表示用页面上的要求"),
+                        ], show="exam_enabled"),
+                        self.__alert("考核单点配置用来解决「同一站点无法单独配置」的问题:"
+                                     "可为每个站点分别指定考核页面与各项指标目标值,"
+                                     "插件会用你填的目标替代页面上的要求参与达成度与风险推算。",
+                                     "info", 12, show="exam_enabled"),
                     ]),
-                    self.__row([
-                        self.__select("exam_sites", "需要追踪考核的站点", 6, site_opts),
-                        self.__text("exam_paths", "考核页面路径(逗号分隔)", 3, "/rules.php,/"),
-                        self.__text("exam_keyword", "识别关键词", 3, "考核"),
-                    ]),
-                    self.__row([
-                        self.__cron("exam_cron", "独立考核检查周期(留空=并入侵检)", 12, "35 8 * * *"),
-                    ]),
-                    self.__row([
-                        self.__textarea("exam_site_config", "考核单点配置(按站覆盖)", 12, 6,
-                                        "每行一条,字段用 | 分隔:# 开头为注释\n"
-                                        "站点ID | 考核页面 | 上传目标 | 做种积分目标 | 分享率目标 | 备注\n"
-                                        "目标也支持 关键词=目标 写法,如:上传=83.2GB;积分=1200;分享率=1.05\n"
-                                        "示例:\n4 | /rules.php | 83.2GB | 0 | 0 | PTS 新手考核\n"
-                                        "3 | | 300GB | | 1.2 | 填写空白字段表示用页面上的要求"),
-                    ]),
-                    self.__alert("考核单点配置用来解决「同一站点无法单独配置」的问题:"
-                                 "可为每个站点分别指定考核页面与各项指标目标值,"
-                                 "插件会用你填的目标替代页面上的要求参与达成度与风险推算。", "info", 12),
 
                     # ========== ④ IO 哨兵 ==========
-                    {"component": "VDivider", "props": {"class": "my-4"}},
-                    self.__section("④ 磁盘 / 刷流 IO 哨兵"),
-                    self.__row([
-                        self.__text("io_interval", "采样间隔(分钟)", 3, "5"),
-                        self.__text("io_sample_seconds", "采样窗口(秒)", 3, "3"),
-                        self.__text("io_keep", "保留最近采样条数", 3, "20"),
-                        self.__text("io_notify_cooldown", "告警冷却(分钟)", 3, "30"),
+                    self.__card("④ 磁盘 / 刷流 IO 哨兵", "mdi-speedometer", [
+                        self.__row([
+                            self.__switch("io_enabled", "启用 IO 巡检", 3),
+                            self.__text("io_interval", "采样间隔(分钟)", 3, "5"),
+                            self.__text("io_sample_seconds", "采样窗口(秒)", 3, "3"),
+                            self.__text("io_keep", "保留最近采样条数", 3, "20"),
+                        ]),
+                        self.__row([
+                            self.__text("io_notify_cooldown", "告警冷却(分钟)", 3, "30"),
+                            self.__switch("io_check_qbt", "检查刷流下载器速率", 3),
+                            self.__text("qb_downloader", "刷流下载器名(留空=自动)", 3, "如:刷流"),
+                            self.__text("io_devices", "监控设备(逗号分隔,留空=自动)", 3, "如:sda,sata1"),
+                        ], show="io_enabled"),
+                        self.__row([
+                            self.__text("load_threshold", "负载红线", 3, "8"),
+                            self.__text("queue_threshold", "磁盘队列红线", 3, "50"),
+                            self.__text("iowait_threshold", "IO 等待红线(%)", 3, "30"),
+                            self.__text("up_rate_min", "上传速率下限(MB/s)", 3, "1.0"),
+                        ], show="io_enabled"),
+                        self.__row([
+                            self.__text("latency_threshold", "写延迟参考红线(ms,0=不检查)", 12, "1500"),
+                        ], show="io_enabled"),
+                        self.__alert("写延迟在写缓存 flush 突发时会飙到上千毫秒而队列仍很小,"
+                                     "属于正常现象,因此默认阈值放得很宽(1500ms)或置 0 关闭;"
+                                     "判据以「磁盘队列 + 负载」为主。", "warning", 12, show="io_enabled"),
                     ]),
-                    self.__row([
-                        self.__text("io_devices", "监控设备(逗号分隔,留空=自动)", 6, "如:sda,sata1,nvme0n1"),
-                        self.__switch("io_check_qbt", "检查刷流下载器速率", 3),
-                        self.__text("qb_downloader", "刷流下载器名(留空=自动)", 3, "如:刷流"),
-                    ]),
-                    self.__row([
-                        self.__text("load_threshold", "负载红线", 3, "8"),
-                        self.__text("queue_threshold", "磁盘队列红线", 3, "50"),
-                        self.__text("iowait_threshold", "IO 等待红线(%)", 3, "30"),
-                        self.__text("up_rate_min", "上传速率下限(MB/s)", 3, "1.0"),
-                    ]),
-                    self.__row([
-                        self.__text("latency_threshold", "写延迟参考红线(ms,0=不检查)", 12, "1500"),
-                    ]),
-                    self.__alert("写延迟在写缓存 flush 突发时会飙到上千毫秒而队列仍很小,"
-                                 "属于正常现象,因此默认阈值放得很宽(1500ms)或置 0 关闭;"
-                                 "判据以「磁盘队列 + 负载」为主。", "warning", 12),
 
                     # ========== ⑤ 自动降级 / 恢复 ==========
-                    {"component": "VDivider", "props": {"class": "my-4"}},
-                    self.__section("⑤ 自动降级 / 自动恢复(默认关闭)"),
-                    self.__row([
-                        self.__switch("auto_downgrade", "超红线自动降下载并发", 3),
-                        self.__text("downgrade_step", "每次降低档数", 3, "1"),
-                        self.__text("downgrade_min", "并发最低下限", 3, "2"),
-                        self.__text("downgrade_cooldown", "降级冷却(分钟)", 3, "30"),
+                    self.__card("⑤ 自动降级 / 自动恢复(默认关闭)", "mdi-shield-alert-outline", [
+                        self.__row([
+                            self.__switch("auto_downgrade", "超红线自动降下载并发", 6),
+                            self.__switch("auto_recover", "恢复后自动升回并发", 6),
+                        ]),
+                        self.__row([
+                            self.__text("downgrade_step", "每次降低档数", 4, "1"),
+                            self.__text("downgrade_min", "并发最低下限", 4, "2"),
+                            self.__text("downgrade_cooldown", "降级冷却(分钟)", 4, "30"),
+                        ], show="auto_downgrade"),
+                        self.__row([
+                            self.__text("recover_step", "每次升高档数", 6, "1"),
+                            self.__text("recover_wait", "连续正常多久才升回(分钟)", 6, "30"),
+                        ], show="auto_recover"),
+                        self.__alert("会自动修改刷流下载器的并发上限。默认关闭;首次降级时记下当时并发"
+                                     "作为升回基线。", "warning", 12),
                     ]),
-                    self.__row([
-                        self.__switch("auto_recover", "恢复后自动升回并发", 3),
-                        self.__text("recover_step", "每次升高档数", 3, "1"),
-                        self.__text("recover_wait", "连续正常多久才升回(分钟)", 6, "30"),
-                    ]),
-                    self.__alert("自动降级/恢复会修改刷流下载器的并发上限。默认关闭,"
-                                 "确认理解影响后再打开;首次降级时会记下原始并发作为升回的上限。",
-                                 "warning", 12),
                 ],
             },
             {
@@ -506,25 +521,36 @@ class NasSentinel(_PluginBase):
                 h.get("time", ""), h.get("load1", "-"), h.get("up_mbps", "-"), h.get("level", "")))
         hist_text = "\n".join(hist_lines) if hist_lines else "暂无历史采样"
 
+        state = "✅ 已启用" if self._enabled else "⛔ 已禁用"
         return [
             {
                 "component": "VForm",
                 "content": [
-                    self.__alert("上次巡检:%s" % (last.get("time") or "从未运行"), "info", 12),
-                    self.__row([
-                        self.__btn("立即巡检", "mdi-radar", "/run", 3),
-                        self.__btn("立即签到", "mdi-calendar-check", "/signin", 3),
-                        self.__btn("考核检查", "mdi-clipboard-check", "/exam", 3),
-                        self.__btn("IO 检查", "mdi-speedometer", "/io", 3),
+                    self.__alert("当前状态:%s | 上次巡检:%s" % (
+                        state, last.get("time") or "从未运行"),
+                        "success" if self._enabled else "warning", 12),
+                    self.__card("快捷操作", "mdi-gesture-tap-button", [
+                        self.__row([
+                            self.__btn("启用插件", "mdi-power-plug", "/enable", 3),
+                            self.__btn("禁用插件", "mdi-power-plug-off", "/disable", 3),
+                            self.__btn("立即巡检", "mdi-radar", "/run", 3),
+                            self.__btn("测试通知", "mdi-bell-ring", "/test_notify", 3),
+                        ]),
+                        self.__row([
+                            self.__btn("立即签到", "mdi-calendar-check", "/signin", 4),
+                            self.__btn("考核检查", "mdi-clipboard-check", "/exam", 4),
+                            self.__btn("IO 检查", "mdi-speedometer", "/io", 4),
+                        ]),
+                        self.__alert("「立即巡检」= 签到 + 考核 + IO 一次跑完;"
+                                     "「启用/禁用插件」走 mp 的插件配置用例(保存 + 重新初始化 + 刷新调度),"
+                                     "与在插件列表里开关等效;「测试通知」会忽略免打扰时段。"
+                                     "结果约 10~20 秒后刷新本页可见。", "info", 12),
                     ]),
-                    self.__section("考核进度"),
-                    self.__pane(exam_text),
-                    self.__section("签到结果"),
-                    self.__pane(sign_text),
-                    self.__section("IO 健康"),
-                    self.__pane(io_text),
-                    self.__section("IO 历史采样(最近 %d 次)" % self._io_keep),
-                    self.__pane(hist_text),
+                    self.__card("考核进度", "mdi-clipboard-check", [self.__pane(exam_text)]),
+                    self.__card("签到结果", "mdi-calendar-check", [self.__pane(sign_text)]),
+                    self.__card("IO 健康", "mdi-speedometer", [self.__pane(io_text)]),
+                    self.__card("IO 历史采样(最近 %d 次)" % self._io_keep, "mdi-chart-line",
+                                [self.__pane(hist_text)]),
                 ],
             }
         ]
@@ -556,6 +582,42 @@ class NasSentinel(_PluginBase):
     def api_exam(self):
         self.__bg(self.run_exam, manual=True)
         return {"success": True, "message": "已开始考核检查,约 10 秒后刷新本页查看结果"}
+
+    def api_enable(self):
+        return self.__set_enabled(True)
+
+    def api_disable(self):
+        return self.__set_enabled(False)
+
+    def api_test_notify(self):
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.__notify_send("NAS 哨兵·测试通知",
+                           "这是一条测试消息,收到即表示通知链路正常。\n发送时间:%s" % now,
+                           force=True)
+        return {"success": True, "message": "测试通知已发送(已忽略免打扰时段)"}
+
+    def __set_enabled(self, on: bool) -> Dict[str, Any]:
+        """真正启用/禁用插件。
+
+        复用 mp 的插件配置用例(``PluginConfigCommand.update``):保存配置 →
+        重新初始化实例 → 刷新服务/命令/动态路由注册,与在插件列表里开关等效。
+        自己直接写 DB 只会留下「界面说启用了、调度却没注册」的假状态。
+        """
+        pid = self.__class__.__name__
+        try:
+            from app.api.dependencies.plugin import get_plugin_config_command
+            cfg = dict(self.get_config() or {})
+            cfg["enabled"] = bool(on)
+            res = get_plugin_config_command().update(pid, cfg)
+            if bool(getattr(res, "success", False)):
+                logger.info(f"【NAS哨兵】已{'启用' if on else '禁用'}插件")
+                return {"success": True,
+                        "message": "已启用插件(服务已注册)" if on else "已禁用插件(服务已注销)"}
+            return {"success": False,
+                    "message": "操作失败:%s" % (getattr(res, "message", "") or "未知原因")}
+        except Exception as e:
+            logger.error(f"【NAS哨兵】{'启用' if on else '禁用'}插件失败:{e}")
+            return {"success": False, "message": f"操作失败:{e}"}
 
     # =====================================================================
     # 巡检主体
@@ -1327,12 +1389,38 @@ class NasSentinel(_PluginBase):
 
     # ---- 表单小组件(减少重复)-------------------------------------------
     @staticmethod
-    def __row(items: List[dict]) -> dict:
-        return {"component": "VRow", "content": items}
+    def __row(items: List[dict], show: str = "") -> dict:
+        """一行配置。``show`` 传一个配置键名:该键为假则整行隐藏。
+
+        MP 的表单接口会把默认配置合并进 model(注释原文:so all keys exist for
+        v-show evaluation),因此表达式的键一定存在,不会因未定义而抛错。
+        """
+        node: Dict[str, Any] = {"component": "VRow", "content": items}
+        if show:
+            node["props"] = {"show": "{{ %s }}" % show}
+        return node
 
     @staticmethod
     def __col(item: dict, md: int = 12) -> dict:
         return {"component": "VCol", "props": {"cols": 12, "md": md}, "content": [item]}
+
+    @staticmethod
+    def __card(title: str, icon: str, rows: List[dict]) -> dict:
+        """分节卡片:标题带图标 + 内容区。文本一律走 text/node 或 props.text。"""
+        return {
+            "component": "VCard",
+            "props": {"variant": "outlined", "class": "mb-4"},
+            "content": [
+                {"component": "VCardTitle",
+                 "props": {"class": "d-flex align-center text-subtitle-1"},
+                 "content": [
+                     {"component": "VIcon",
+                      "props": {"icon": icon, "class": "mr-2", "color": "primary"}},
+                     {"component": "div", "text": title},
+                 ]},
+                {"component": "VCardText", "content": rows},
+            ],
+        }
 
     @staticmethod
     def __section(title: str) -> dict:
@@ -1384,7 +1472,9 @@ class NasSentinel(_PluginBase):
                                  "method": "post"}},
         }, md)
 
-    def __alert(self, text: str, type_: str, md: int) -> dict:
+    def __alert(self, text: str, type_: str, md: int, show: str = "") -> dict:
         """VAlert 的文本必须写在 props.text(放顶层 content 会渲染成空)。"""
-        return self.__col({"component": "VAlert",
-                           "props": {"type": type_, "variant": "tonal", "text": text}}, md)
+        props: Dict[str, Any] = {"type": type_, "variant": "tonal", "text": text}
+        if show:
+            props["show"] = "{{ %s }}" % show
+        return self.__col({"component": "VAlert", "props": props}, md)
