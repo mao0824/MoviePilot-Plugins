@@ -47,6 +47,18 @@ MoviePilot 对 Release 的命名有硬要求，写错就装不上：
 - 资产名 = **tag 全小写** + `.zip`，例如 `sitelevelboard_v0.1.3.zip`；
 - **zip 根目录就是插件文件**（`__init__.py`、`dist/`、`README.md` …），不要多套一层目录名。
 
+## 改前端（本地构建）
+
+`dist/` 是提交进仓库的，只改 Python 时不需要构建。要动 `src/` 时：
+
+```bash
+scripts/setup-build-env.sh --wasm-rollup
+```
+
+`--wasm-rollup` 用来绕开一个环境坑：部分 Node 发行版（硬化运行时 + 库校验）加载 rollup 原生模块会
+报 `ERR_DLOPEN_FAILED`，换成纯 WASM 版即可；依赖安装末尾若出现
+`ERR_PNPM_IGNORED_BUILDS: esbuild`，忽略它，构建照常能跑。`NODE_BIN` / `PNPM_BIN` 可指定 node / pnpm。
+
 ## 许可
 
 MIT。等级规则与字段口径参考 **PT-depiler / PT-Plugin-Plus**（均为 MIT）。

@@ -1,0 +1,6 @@
+allowBuilds:
+  esbuild: set this to true or false
+# pnpm 供应链策略:只放行 esbuild 的构建脚本(vite 依赖它下载平台二进制)
+# 之前的写法是 pnpm 写下的提示占位("set this to true or false"),这里明确放行
+onlyBuiltDependencies:
+  - esbuild
