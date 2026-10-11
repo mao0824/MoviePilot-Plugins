@@ -1,35 +1,41 @@
 
 /* 只做微调;主题色/间距一律沿用宿主 Vuetify 主题 */
-.bg-primary tr td[data-v-17e75de1],
-tr.bg-primary td[data-v-17e75de1] {
+.bg-primary tr td[data-v-22affc2a],
+tr.bg-primary td[data-v-22affc2a] {
   background: rgba(var(--v-theme-primary), 0.12);
 }
 
 /* 右侧页签:贴着状态条底部,与内容区用同一条分隔线 */
-.slb-tabs[data-v-17e75de1] {
+.slb-tabs[data-v-22affc2a] {
   border-top: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
 }
 
 /* 流量趋势曲线:撑满宽度、鼠标可读数值 */
-.slb-chart[data-v-17e75de1] {
+.slb-chart[data-v-22affc2a] {
   cursor: crosshair;
 }
-.slb-chart svg[data-v-17e75de1] {
+.slb-chart svg[data-v-22affc2a] {
   display: block;
   width: 100%;
   height: 64px;
 }
 
+/* 汇总文本:等宽字体,便于阅读对齐 */
+.slb-report[data-v-22affc2a] textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
 /* 左侧站点列表:可拖动 + 插入位置提示 */
-.slb-item[data-v-17e75de1] {
+.slb-item[data-v-22affc2a] {
   cursor: grab;
 }
-.slb-item.slb-dragging[data-v-17e75de1] {
+.slb-item.slb-dragging[data-v-22affc2a] {
   opacity: 0.4;
 }
-.slb-item.slb-drop-above[data-v-17e75de1] {
+.slb-item.slb-drop-above[data-v-22affc2a] {
   box-shadow: inset 0 2px 0 0 rgb(var(--v-theme-primary));
 }
-.slb-item.slb-drop-below[data-v-17e75de1] {
+.slb-item.slb-drop-below[data-v-22affc2a] {
   box-shadow: inset 0 -2px 0 0 rgb(var(--v-theme-primary));
 }

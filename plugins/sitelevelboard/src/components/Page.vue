@@ -51,6 +51,10 @@ const addSearch = ref('')
 const addSelected = ref([])
 const confirmTarget = ref(null)
 
+const reportOpen = ref(false)
+const reportText = ref('')
+const reportLoading = ref(false)
+
 const filteredCandidates = computed(() => {
   const kw = addSearch.value.trim().toLowerCase()
   if (!kw) return candidates.value
@@ -65,22 +69,24 @@ function toast(text, color = 'success') {
   snack.value = { show: true, text, color }
 }
 
-async function req(method, path, body) {
-  let raw
+/** 发请求,拿**原始响应体**(有些端点把文本放在 message 里,比如 /report)。 */
+async function rawReq(method, path, body) {
   if (props.api && typeof props.api[method] === 'function') {
     // 走宿主 api:相对 path(宿主已带 api/v1 前缀),见上方 REL_BASE 注释
-    raw = await props.api[method](REL_BASE + path, body)
-  } else {
-    const res = await fetch(ABS_BASE + path, {
-      method: method.toUpperCase(),
-      credentials: 'include',
-      cache: 'no-store',
-      headers: body ? { 'Content-Type': 'application/json' } : {},
-      body: body ? JSON.stringify(body) : undefined,
-    })
-    raw = await res.json()
+    return await props.api[method](REL_BASE + path, body)
   }
-  return unwrapResponse(raw)
+  const res = await fetch(ABS_BASE + path, {
+    method: method.toUpperCase(),
+    credentials: 'include',
+    cache: 'no-store',
+    headers: body ? { 'Content-Type': 'application/json' } : {},
+    body: body ? JSON.stringify(body) : undefined,
+  })
+  return await res.json()
+}
+
+async function req(method, path, body) {
+  return unwrapResponse(await rawReq(method, path, body))
 }
 
 async function loadSites(keepSelection = true) {
@@ -193,6 +199,46 @@ async function doRemove(site) {
     toast(describeError(e), 'error')
   } finally {
     busy.value = false
+  }
+}
+
+/**
+ * 复制汇总:取 /report 的文字版(全站等级/条件/风险),弹窗里可全选、一键复制。
+ * 注意 /report 把文本放在 message 里(不是 data),所以这里用 rawReq 取原始响应。
+ */
+async function loadReport() {
+  reportLoading.value = true
+  try {
+    const raw = await rawReq('get', '/report')
+    const text = String((raw && (raw.message || raw.data)) || '').trim()
+    reportText.value = text || '(暂无内容:先在插件里刷新一次数据)'
+    reportOpen.value = true
+  } catch (e) {
+    toast(describeError(e), 'error')
+  } finally {
+    reportLoading.value = false
+  }
+}
+
+async function copyReport() {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(reportText.value)
+    } else {
+      // http 页面不是安全上下文,没有 clipboard API → 退回隐藏 textarea + execCommand
+      const area = document.createElement('textarea')
+      area.value = reportText.value
+      area.style.position = 'fixed'
+      area.style.opacity = '0'
+      document.body.appendChild(area)
+      area.select()
+      document.execCommand('copy')
+      document.body.removeChild(area)
+    }
+    toast('已复制到剪贴板', 'success')
+    reportOpen.value = false
+  } catch (e) {
+    toast('复制失败,可在弹窗里手动全选复制', 'warning')
   }
 }
 
@@ -320,6 +366,42 @@ const riskSummary = computed(() => ({
   warn: tracked.value.filter(s => s.risk === 'warn'),
 }))
 
+/** 保号路线图(后端 roadmap:到「可封存 / 永久保留」档还差几级、照当前增速多久、卡在哪)。 */
+const roadmapRows = computed(() => {
+  const rm = detail.value?.roadmap || {}
+  return [
+    { key: 'parkable', label: '可封存保号', icon: 'mdi-shield-lock-outline', tone: 'success', data: rm.parkable },
+    { key: 'permanent', label: '永久保留', icon: 'mdi-shield-star-outline', tone: 'primary', data: rm.permanent },
+  ].filter(row => row.data)
+})
+
+function roadmapAway(m) {
+  if (!m) return ''
+  if (m.reached) return '已达成'
+  return `还差 ${m.levels_away} 级${m.name ? ` → ${m.name}` : ''}`
+}
+
+function roadmapEta(m) {
+  if (!m) return ''
+  if (m.reached) return '✅'
+  const hasEta = m.eta_days !== null && m.eta_days !== undefined
+  if (m.blockers?.length) {
+    if (!hasEta) return '暂不可估'
+    if (m.eta_days <= 0) return '其余条件已就位,只差卡点'
+    return `最快 ${fmtEta(m.eta_days)}(仅按可推算条件)`
+  }
+  return hasEta ? `${fmtEta(m.eta_days)}(${CONFIDENCE_LABEL[m.confidence] || '?'})` : '暂不可估'
+}
+
+function roadmapBlocker(m) {
+  return (m?.blockers || []).map(b => {
+    const kind = b.kind === 'manual' ? '需人为推动' : '数据不足'
+    const cur = (b.current === null || b.current === undefined) ? null : fmtNum(b.current)
+    const target = `${fmtNum(b.target)}${b.unit || ''}`
+    return cur === null ? `${b.label}(${kind})` : `${b.label}:当前 ${cur} / 目标 ${target}(${kind})`
+  }).join(' · ')
+}
+
 function riskColor(risk) {
   return risk === 'danger' ? 'error' : risk === 'warn' ? 'warning' : 'success'
 }
@@ -357,6 +439,10 @@ onMounted(() => loadSites(true))
         </div>
       </VCol>
       <VCol cols="auto">
+        <VBtn size="small" variant="text" prepend-icon="mdi-file-document-outline"
+              :loading="reportLoading" @click="loadReport">
+          复制汇总
+        </VBtn>
         <VBtn size="small" variant="tonal" prepend-icon="mdi-refresh" :loading="busy" @click="refreshAll">
           刷新全部
         </VBtn>
@@ -585,17 +671,26 @@ onMounted(() => loadSites(true))
             <VCol cols="12" md="6">
               <VCard variant="outlined" class="h-100">
                 <VCardTitle class="text-subtitle-2 d-flex align-center">
-                  <VIcon icon="mdi-shield-check-outline" start size="18" color="success" />保号状态与条件
+                  <VIcon icon="mdi-shield-check-outline" start size="18" color="success" />保号状态与路线
                 </VCardTitle>
                 <VDivider />
                 <VCardText class="text-body-2">
                   <div v-if="detail">
-                    <div>可封存保号(封存后不会被删):<b>{{ detail.keep?.parkable_now ? '✅ 已达'
-                      : (detail.keep?.levels_to_parkable !== null && detail.keep?.levels_to_parkable !== undefined
-                        ? `还差 ${detail.keep.levels_to_parkable} 级` : '未知') }}</b></div>
-                    <div>永久保留(不封存也不删):<b>{{ detail.keep?.permanent_now ? '✅ 已达'
-                      : (detail.keep?.levels_to_permanent !== null && detail.keep?.levels_to_permanent !== undefined
-                        ? `还差 ${detail.keep.levels_to_permanent} 级` : '未知') }}</b></div>
+                    <div v-for="row in roadmapRows" :key="row.key" class="mb-2">
+                      <div class="d-flex align-center flex-wrap">
+                        <VIcon :icon="row.icon" size="16" :color="row.tone" class="mr-1" />
+                        <b>{{ row.label }}</b>
+                        <span class="ml-1 text-medium-emphasis">{{ roadmapAway(row.data) }}</span>
+                        <VSpacer />
+                        <span class="text-caption">{{ roadmapEta(row.data) }}</span>
+                      </div>
+                      <div v-if="roadmapBlocker(row.data)" class="text-caption text-warning ml-5">
+                        卡点:{{ roadmapBlocker(row.data) }}
+                      </div>
+                    </div>
+                    <div v-if="!roadmapRows.length" class="text-medium-emphasis mb-2">
+                      该站规则里没有保号档信息(仍可看下面的条款原文)
+                    </div>
                     <VDivider class="my-2" />
                     <div v-for="(t, i) in detail.keep_rules || []" :key="'k' + i">✅ {{ t }}</div>
                     <div v-if="!(detail.keep_rules || []).length" class="text-medium-emphasis">站点未提供保号条款</div>
@@ -787,6 +882,25 @@ onMounted(() => loadSites(true))
       </VCard>
     </VDialog>
 
+    <!-- 复制汇总:取 /report 的文字版,弹窗里可全选、一键复制 -->
+    <VDialog v-model="reportOpen" max-width="760" scrollable>
+      <VCard>
+        <VCardTitle class="text-subtitle-1 d-flex align-center">
+          <VIcon icon="mdi-file-document-outline" start color="primary" />等级汇总(可复制)
+        </VCardTitle>
+        <VDivider />
+        <VCardText>
+          <VTextarea v-model="reportText" readonly variant="outlined" rows="18" hide-details
+                     class="slb-report" />
+        </VCardText>
+        <VCardActions>
+          <VSpacer />
+          <VBtn variant="text" @click="reportOpen = false">关闭</VBtn>
+          <VBtn color="primary" variant="flat" prepend-icon="mdi-content-copy" @click="copyReport">复制</VBtn>
+        </VCardActions>
+      </VCard>
+    </VDialog>
+
     <VSnackbar v-model="snack.show" :color="snack.color" :timeout="3000" location="bottom">
       {{ snack.text }}
     </VSnackbar>
@@ -813,6 +927,12 @@ tr.bg-primary td {
   display: block;
   width: 100%;
   height: 64px;
+}
+
+/* 汇总文本:等宽字体,便于阅读对齐 */
+.slb-report :deep(textarea) {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
 }
 
 /* 左侧站点列表:可拖动 + 插入位置提示 */

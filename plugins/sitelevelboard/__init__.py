@@ -770,14 +770,15 @@ class SiteLevelBoard(_PluginBase):
                     break
 
         reqs = []
-        if next_level:
+        live: Dict[str, Any] = {}
+        live_hist: List[Dict[str, Any]] = []
+        if next_level or order_now is not None:
             live = self.__live_values(site, spec) or {}
             if live:
                 self.__record_live(sid, live)      # 站点页取到的值也落盘 → 供斜率用
             live_hist = self.__live_hist(sid)
-            for r in next_level.get("requirements") or []:
-                cur_val = live.get(r["key"], cur.get(r["key"]))
-                reqs.append(self.__eval_req(r, cur_val, cur, hist, spec, live_hist))
+        if next_level:
+            reqs = self.__eval_level_reqs(next_level, cur, hist, spec, live, live_hist)
 
         eta_days, confidence = self.__site_eta(reqs, cur, hist)
         manual_blocked = any(r["eta_kind"] == "manual" and not r["met"] for r in reqs)
@@ -797,8 +798,55 @@ class SiteLevelBoard(_PluginBase):
             "source": spec.get("source"), "snapshot_date": spec.get("snapshot_date"),
             "l1_updated": cur.get("updated_time"),
             "keep": self.__keep_status(ladder, order_now),
+            "roadmap": self.__keep_roadmap(ladder, order_now, cur, hist, spec, live, live_hist),
         }
         return r
+
+    def __eval_level_reqs(self, level: Optional[Dict[str, Any]], cur: Dict[str, Any],
+                          hist: List[Dict[str, Any]], spec: Dict[str, Any],
+                          live: Dict[str, Any],
+                          live_hist: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+        """评估某一等级的全部晋级条件 —— 「下一级」与「保号路线图」共用同一套口径。"""
+        reqs = []
+        for r in ((level or {}).get("requirements") or []):
+            cur_val = live.get(r["key"], cur.get(r["key"]))
+            reqs.append(self.__eval_req(r, cur_val, cur, hist, spec, live_hist))
+        return reqs
+
+    def __keep_roadmap(self, ladder: List[Dict[str, Any]], order_now: Optional[int],
+                       cur: Dict[str, Any], hist: List[Dict[str, Any]], spec: Dict[str, Any],
+                       live: Dict[str, Any],
+                       live_hist: Optional[List[Dict[str, Any]]]) -> Dict[str, Any]:
+        """保号路线图:到「可封存保号 / 永久保留」档还差几级、照当前增速要多久、卡在哪一项。
+
+        口径与「下一级 ETA」完全一致(逐条评估目标档的条件 → 取最慢的一项);遇到
+        「需人为推动」或数据不足的条件时,ETA 只是**可推算部分**的最快值,单独列出卡点。
+        """
+        out: Dict[str, Any] = {"parkable": None, "permanent": None}
+        if order_now is None:
+            return out
+        for key, flag in (("parkable", "is_parkable"), ("permanent", "is_permanent")):
+            above = next((lv for lv in ladder
+                          if lv.get("order", 0) > order_now and lv.get(flag)), None)
+            if above is None:
+                here = next((lv for lv in ladder
+                             if lv.get("order") == order_now and lv.get(flag)), None)
+                if here is None:
+                    continue          # 该站规则里没有这一档 → 前端不显示
+                out[key] = {"reached": True, "order": order_now, "name": here.get("name"),
+                            "levels_away": 0, "eta_days": 0.0, "confidence": "high",
+                            "blockers": []}
+                continue
+            reqs = self.__eval_level_reqs(above, cur, hist, spec, live, live_hist)
+            eta, conf = self.__site_eta(reqs, cur, hist)
+            blockers = [{"label": r["label"], "kind": r["eta_kind"], "current": r.get("current"),
+                         "target": r.get("target"), "unit": r.get("unit")}
+                        for r in reqs if not r["met"]
+                        and (r["eta_kind"] == "manual" or r["eta_days"] is None)]
+            out[key] = {"reached": False, "order": above.get("order"), "name": above.get("name"),
+                        "levels_away": max(0, int(above.get("order") or 0) - int(order_now)),
+                        "eta_days": eta, "confidence": conf, "blockers": blockers}
+        return out
 
     # ---- 单项条件评估 -----------------------------------------------------
     def __eval_req(self, r: Dict[str, Any], cur_val, cur_row: Dict[str, Any],
