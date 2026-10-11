@@ -169,6 +169,20 @@ def main() -> int:
     instance.api_untrack(mod.TrackPayload(site_id=3))
     check("移出不打乱顺序", store["tracked"] == [7, 5, 4, 6, 999])
 
+    print("[7] ETA 口径(0.0 只代表「条件全达成」,算不出就必须给 None)")
+    site_eta = instance._SiteLevelBoard__site_eta          # 私有方法,自检里直接调
+    hist14 = [{}] * 14
+    check("全部达成 → 0.0", site_eta([{"met": True, "eta_kind": "auto", "eta_days": None}], {}, hist14)[0] == 0.0)
+    check("有未达成但算不出 → None",
+          site_eta([{"met": False, "eta_kind": "auto", "eta_days": None}], {}, hist14)[0] is None)
+    check("有未达成且算得出 → 取最慢的一项",
+          site_eta([{"met": False, "eta_kind": "auto", "eta_days": 3},
+                    {"met": False, "eta_kind": "wait", "eta_days": 11}], {}, hist14)[0] == 11)
+    check("样本不足(<3) → None",
+          site_eta([{"met": False, "eta_kind": "auto", "eta_days": 3}], {}, [{}] * 2)[0] is None)
+    check("需人为推动不计入 ETA",
+          site_eta([{"met": False, "eta_kind": "manual", "eta_days": 5}], {}, hist14)[0] is None)
+
     print()
     if FAILED:
         print(f"未通过 {len(FAILED)} 项:{FAILED}")

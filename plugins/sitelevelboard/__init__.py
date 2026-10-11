@@ -905,21 +905,32 @@ class SiteLevelBoard(_PluginBase):
                     out["eta_days"] = round(days, 1)
                     out["rate_label"] = "+%.2f/天" % scaled
             else:
-                out["rate_label"] = "趋势不足"
+                # slope 为 None = 样本不够;slope <= 0 = 有数据但没在涨(别再笼统写「趋势不足」)
+                out["rate_label"] = ("无增长/在下降" if (slope is not None and slope <= 0)
+                                     else "趋势不足")
         else:
             out["rate_label"] = "需人为推动"
         return out
 
     def __site_eta(self, reqs: List[Dict[str, Any]], cur_row, hist) -> Tuple[Optional[float], str]:
+        """站点级 ETA:取未达成条件里最慢的一项。
+
+        ⚠️ 只有「所有条件都达成」才返回 0.0;若存在未达成条件但一个都算不出 ETA
+        (斜率不足 / 需人为推动),返回 None(未知)—— 早先这里返回 0.0,前端会显示成
+        「已达成」,而站点其实还卡着条件(2026-10-11 实测馒头就是这种情况)。
+        """
         if not reqs:
             return None, "none"
-        etas = [r["eta_days"] for r in reqs if not r["met"] and r["eta_kind"] in ("auto", "wait")
-                and r["eta_days"] is not None]
-        n = len(hist)
-        conf = "high" if n >= 14 else ("mid" if n >= 3 else "low")
-        if n < 3:
+        unmet = [r for r in reqs if not r["met"]]
+        if not unmet:
+            return 0.0, ("high" if len(hist) >= 14 else ("mid" if len(hist) >= 3 else "low"))
+        if len(hist) < 3:
             return None, "none"
-        return (max(etas) if etas else 0.0), conf
+        etas = [r["eta_days"] for r in unmet
+                if r["eta_kind"] in ("auto", "wait") and r["eta_days"] is not None]
+        if not etas:
+            return None, "none"
+        return max(etas), ("high" if len(hist) >= 14 else "mid")
 
     @staticmethod
     def __progress(reqs: List[Dict[str, Any]]) -> Optional[float]:
