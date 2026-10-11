@@ -1,0 +1,25 @@
+
+/* 只做微调;主题色/间距一律沿用宿主 Vuetify 主题 */
+.bg-primary tr td[data-v-6e0ca9c6],
+tr.bg-primary td[data-v-6e0ca9c6] {
+  background: rgba(var(--v-theme-primary), 0.12);
+}
+
+/* 右侧页签:贴着状态条底部,与内容区用同一条分隔线 */
+.slb-tabs[data-v-6e0ca9c6] {
+  border-top: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+}
+
+/* 左侧站点列表:可拖动 + 插入位置提示 */
+.slb-item[data-v-6e0ca9c6] {
+  cursor: grab;
+}
+.slb-item.slb-dragging[data-v-6e0ca9c6] {
+  opacity: 0.4;
+}
+.slb-item.slb-drop-above[data-v-6e0ca9c6] {
+  box-shadow: inset 0 2px 0 0 rgb(var(--v-theme-primary));
+}
+.slb-item.slb-drop-below[data-v-6e0ca9c6] {
+  box-shadow: inset 0 -2px 0 0 rgb(var(--v-theme-primary));
+}

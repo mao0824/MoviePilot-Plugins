@@ -39,6 +39,13 @@ const selectedId = ref(0)
 const detail = ref(null)
 const detailLoading = ref(false)
 
+/**
+ * 右侧详情分三个页签:等级概览 / 等级阶梯 / 流量趋势(与「站点刷流」同样的切法)。
+ * 切换站点时**保留当前页签**(正在看阶梯,点下一个站点还停在阶梯);数据都由 /detail
+ * 一次性返回,切页签不发请求。
+ */
+const activeTab = ref('overview')
+
 const addOpen = ref(false)
 const addSearch = ref('')
 const addSelected = ref([])
@@ -267,6 +274,13 @@ function riskColor(risk) {
   return risk === 'danger' ? 'error' : risk === 'warn' ? 'warning' : 'success'
 }
 
+/** 当前站点有没有风险 —— 显示成「等级概览」页签上的小圆点,人在别的页签也能看见。 */
+const riskLevel = computed(() => {
+  const risks = detail.value?.risks || []
+  if (risks.some(r => r.level === 'danger')) return 'danger'
+  return risks.length ? 'warn' : ''
+})
+
 function etaText(site) {
   if (site.manual_blocked) return '受人为条件限制'
   if (site.eta_days === null || site.eta_days === undefined) {
@@ -382,9 +396,9 @@ onMounted(() => loadSites(true))
         </VCard>
 
         <template v-else>
-          <!-- 概要 -->
+          <!-- 常驻状态条:站点名 / 等级 → 下一级 / ETA / 进度;页签只切下半部分 -->
           <VCard variant="outlined" class="mb-3">
-            <VCardText>
+            <VCardText class="pb-0">
               <div class="d-flex align-center flex-wrap ga-2 mb-2">
                 <span class="text-h6">{{ detail?.site_name || current?.name }}</span>
                 <VChip color="primary" variant="tonal">{{ detail?.level || '?' }}</VChip>
@@ -417,10 +431,19 @@ onMounted(() => loadSites(true))
                 </span>
               </div>
             </VCardText>
+            <VTabs v-model="activeTab" color="primary" density="comfortable" class="slb-tabs">
+              <VTab value="overview">
+                等级概览
+                <VIcon v-if="riskLevel" icon="mdi-circle" size="10" :color="riskColor(riskLevel)" class="ml-1" />
+              </VTab>
+              <VTab value="ladder">等级阶梯</VTab>
+              <VTab value="traffic">流量趋势</VTab>
+            </VTabs>
           </VCard>
 
           <VProgressLinear v-if="detailLoading" indeterminate color="primary" class="mb-3" />
 
+          <template v-if="activeTab === 'overview'">
           <!-- 下一级条件 -->
           <VCard v-if="detail?.reqs?.length" variant="outlined" class="mb-3">
             <VCardTitle class="text-subtitle-2 d-flex align-center">
@@ -507,9 +530,11 @@ onMounted(() => loadSites(true))
               </VCard>
             </VCol>
           </VRow>
+          </template>
 
-          <!-- 等级阶梯 -->
-          <VCard v-if="detail?.ladder?.length" variant="outlined" class="mt-3 mb-3">
+          <!-- ============ 页签二:全部等级阶梯 ============ -->
+          <template v-else-if="activeTab === 'ladder'">
+          <VCard v-if="detail?.ladder?.length" variant="outlined" class="mb-3">
             <VCardTitle class="text-subtitle-2 d-flex align-center">
               <VIcon icon="mdi-stairs" start size="18" color="primary" />全部等级阶梯
               <VSpacer />
@@ -544,12 +569,17 @@ onMounted(() => loadSites(true))
               </tbody>
             </VTable>
           </VCard>
+          <VAlert v-else type="info" variant="tonal" density="compact">
+            该站没有可解析的等级阶梯 —— 站点未公开等级规则,可在插件配置里用「手动规则」补。
+          </VAlert>
+          </template>
 
-          <!-- 流量时间线 -->
-          <VCard v-if="detail?.history?.length" variant="outlined">
+          <!-- ============ 页签三:流量趋势 ============ -->
+          <template v-else>
+          <VCard v-if="detail?.history?.length" variant="outlined" class="mb-3">
             <VCardTitle class="text-subtitle-2 d-flex align-center">
               <VIcon icon="mdi-chart-line" start size="18" color="primary" />
-              流量时间线(最近 {{ detail.history.length }} 天 · 来自 mp 的 siteuserdata 日快照)
+              流量趋势(最近 {{ detail.history.length }} 天 · 来自 mp 的 siteuserdata 日快照)
             </VCardTitle>
             <VDivider />
             <VCardText>
@@ -583,6 +613,10 @@ onMounted(() => loadSites(true))
               </VTable>
             </VCardText>
           </VCard>
+          <VAlert v-else type="info" variant="tonal" density="compact">
+            还没有历史快照 —— mp 的 siteuserdata 每天更新一行,攒几天后这里会出现曲线。
+          </VAlert>
+          </template>
         </template>
       </VCol>
     </VRow>
@@ -648,6 +682,11 @@ onMounted(() => loadSites(true))
 .bg-primary tr td,
 tr.bg-primary td {
   background: rgba(var(--v-theme-primary), 0.12);
+}
+
+/* 右侧页签:贴着状态条底部,与内容区用同一条分隔线 */
+.slb-tabs {
+  border-top: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
 }
 
 /* 左侧站点列表:可拖动 + 插入位置提示 */
