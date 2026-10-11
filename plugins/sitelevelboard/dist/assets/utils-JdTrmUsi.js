@@ -60,4 +60,4 @@ function fmtGb(v) {
   return `${n.toFixed(n < 10 ? 2 : 1)} GB`
 }
 
-export { CONFIDENCE_LABEL as C, SOURCE_LABEL as S, fmtNum as a, fmtEta as b, describeError as d, fmtGb as f, unwrapResponse as u };
+export { CONFIDENCE_LABEL as C, SOURCE_LABEL as S, fmtEta as a, fmtGb as b, describeError as d, fmtNum as f, unwrapResponse as u };

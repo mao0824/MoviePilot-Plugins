@@ -240,35 +240,85 @@ function onDragEnd() {
   overIndex.value = -1
 }
 
-/** 历史上传曲线(内联 SVG,不引第三方图表库)。 */
-const spark = computed(() => {
-  const hist = detail.value?.history || []
-  if (hist.length < 2) return null
-  const vals = hist.map(h => Number(h.upload_gb) || 0)
+/** 趋势可选指标(键名 = /detail 里 history 的字段)。 */
+const TRAFFIC_METRICS = [
+  { key: 'upload_gb', label: '上传', fmt: v => fmtGb(v) },
+  { key: 'download_gb', label: '下载', fmt: v => fmtGb(v) },
+  { key: 'ratio', label: '分享率', fmt: v => fmtNum(v, 3) },
+  { key: 'bonus', label: '魔力/积分', fmt: v => fmtNum(v, 1) },
+  { key: 'seeding_size_gb', label: '做种体积', fmt: v => fmtGb(v) },
+  { key: 'seeding', label: '做种数', fmt: v => fmtNum(v, 0) },
+]
+const trafficMetric = ref('upload_gb')
+const trafficRange = ref(14)
+const trafficHover = ref(-1)
+
+const trafficRows = computed(() => (detail.value?.history || []).slice(-trafficRange.value))
+const trafficMetricDef = computed(
+  () => TRAFFIC_METRICS.find(m => m.key === trafficMetric.value) || TRAFFIC_METRICS[0],
+)
+
+/** 内联 SVG 折线(不引第三方图表库;纵轴按当前指标自适应)。 */
+const trafficChart = computed(() => {
+  const rows = trafficRows.value
+  if (rows.length < 2) return null
+  const vals = rows.map(h => Number(h[trafficMetric.value]) || 0)
   const min = Math.min(...vals)
   const max = Math.max(...vals)
   const span = Math.max(max - min, 1)
   const w = 100
   const h = 28
-  const pts = vals.map((v, i) => {
+  const points = vals.map((v, i) => {
     const x = (i / (vals.length - 1)) * w
     const y = h - ((v - min) / span) * h
     return `${x.toFixed(2)},${y.toFixed(2)}`
   })
-  return { points: pts.join(' '), min, max, w, h }
+  return { min, max, w, h, points: points.join(' ') }
 })
 
-const timelineTrend = computed(() => {
-  const hist = detail.value?.history || []
-  if (hist.length < 2) return ''
-  const a = hist[0]
-  const b = hist[hist.length - 1]
-  const du = (Number(b.upload_gb) || 0) - (Number(a.upload_gb) || 0)
-  const dd = (Number(b.download_gb) || 0) - (Number(a.download_gb) || 0)
-  const days = Math.max(hist.length - 1, 1)
-  return `${a.day} → ${b.day}:上传 ${du >= 0 ? '+' : ''}${fmtGb(du)},下载 ${dd >= 0 ? '+' : ''}${fmtGb(dd)}`
-    + `(日均 ${du >= 0 ? '+' : ''}${(du / days).toFixed(2)} GB / ${(dd / days).toFixed(2)} GB)`
+/** 鼠标在图上移动 → 定位到最近的采样日,读出当天数值。 */
+function onChartMove(event) {
+  const rows = trafficRows.value
+  if (!rows.length || !trafficChart.value) return
+  const rect = event.currentTarget.getBoundingClientRect()
+  const ratio = Math.min(Math.max((event.clientX - rect.left) / rect.width, 0), 1)
+  trafficHover.value = Math.round(ratio * (rows.length - 1))
+}
+
+/** 区间变化一行:按当前指标与范围算首末差 + 日均。 */
+const trafficTrend = computed(() => {
+  const rows = trafficRows.value
+  if (rows.length < 2) return ''
+  const key = trafficMetric.value
+  const def = trafficMetricDef.value
+  const first = Number(rows[0][key]) || 0
+  const last = Number(rows[rows.length - 1][key]) || 0
+  const delta = last - first
+  const perDay = delta / Math.max(rows.length - 1, 1)
+  const sign = v => (v >= 0 ? '+' : '')
+  return `${rows[0].day} → ${rows[rows.length - 1].day}:${def.label} ${sign(delta)}${def.fmt(delta)}`
+    + ` · 日均 ${sign(perDay)}${def.fmt(perDay)}`
 })
+
+/**
+ * 「最紧条件」——与后端 __progress 同一口径:取未达成条件里 当前/目标 最小的那个,
+ * 让「到底卡在哪一项」直接写在脸上(进度条只给了个百分比)。
+ */
+const tightest = computed(() => {
+  const unmet = (detail.value?.reqs || []).filter(r => !r.met)
+  if (!unmet.length) return null
+  const ratio = r => (r.target && typeof r.current === 'number' && r.target > 0
+    ? Math.min(1, r.current / r.target) : null)
+  const scored = unmet.map(r => ({ r, v: ratio(r) })).filter(x => x.v !== null)
+  if (!scored.length) return unmet[0]
+  return scored.reduce((a, b) => (b.v < a.v ? b : a)).r
+})
+
+/** 全站风险汇总:数据来自 /sites(每站的 risk 由后端算好),点站点名可跳到该站。 */
+const riskSummary = computed(() => ({
+  danger: tracked.value.filter(s => s.risk === 'danger'),
+  warn: tracked.value.filter(s => s.risk === 'warn'),
+}))
 
 function riskColor(risk) {
   return risk === 'danger' ? 'error' : risk === 'warn' ? 'warning' : 'success'
@@ -320,6 +370,27 @@ onMounted(() => loadSites(true))
     <VRow>
       <!-- ============ 左:站点列表 ============ -->
       <VCol cols="12" md="3">
+        <!-- 全站风险汇总:一眼看全站有没有要处理的,点名字跳过去 -->
+        <VCard v-if="tracked.length" variant="tonal" class="mb-3"
+               :color="riskSummary.danger.length ? 'error' : (riskSummary.warn.length ? 'warning' : 'success')">
+          <VCardText class="py-2 text-caption">
+            <template v-if="riskSummary.danger.length || riskSummary.warn.length">
+              <b>风险汇总</b>
+              <span v-if="riskSummary.danger.length" class="ml-1">⛔ {{ riskSummary.danger.length }}</span>
+              <span v-if="riskSummary.warn.length" class="ml-1">⚠️ {{ riskSummary.warn.length }}</span>
+              <div class="mt-1">
+                <VChip v-for="s in [...riskSummary.danger, ...riskSummary.warn]" :key="'risk' + s.id"
+                       size="x-small" variant="flat" class="mr-1 mb-1" @click="selectSite(s.id)">
+                  {{ s.name }}
+                </VChip>
+              </div>
+            </template>
+            <template v-else>
+              ✅ {{ tracked.length }} 个站点均无风险提示
+            </template>
+          </VCardText>
+        </VCard>
+
         <VCard variant="outlined">
           <VCardTitle class="text-subtitle-2 d-flex align-center">
             <VIcon icon="mdi-server-network" start size="18" color="primary" />站点({{ tracked.length }})
@@ -444,6 +515,30 @@ onMounted(() => loadSites(true))
           <VProgressLinear v-if="detailLoading" indeterminate color="primary" class="mb-3" />
 
           <template v-if="activeTab === 'overview'">
+          <!-- 最紧条件:把「到底卡在哪一项」写在最前面 -->
+          <VCard v-if="tightest" variant="outlined" class="mb-3">
+            <VCardTitle class="text-subtitle-2 d-flex align-center">
+              <VIcon icon="mdi-target" start size="18" color="primary" />卡住晋级的是
+            </VCardTitle>
+            <VDivider />
+            <VCardText class="text-body-2">
+              <div class="mb-1 font-weight-medium">{{ tightest.label }}</div>
+              <div class="text-caption text-medium-emphasis">
+                当前 {{ tightest.current === null ? '取不到' : fmtNum(tightest.current) + tightest.unit }}
+                → 目标 {{ fmtNum(tightest.target) }}{{ tightest.unit }}
+                <template v-if="typeof tightest.current === 'number' && tightest.target">
+                  · 还差 {{ fmtNum(Math.max(0, tightest.target - tightest.current)) }}{{ tightest.unit }}
+                </template>
+                · {{ tightest.eta_days !== null && tightest.eta_days !== undefined
+                  ? `${tightest.rate_label || ''} → ${fmtEta(tightest.eta_days)}`
+                  : (tightest.eta_kind === 'manual' ? '需人为推动,光等不会达成' : '趋势不足(攒够样本后可估)') }}
+              </div>
+            </VCardText>
+          </VCard>
+          <VAlert v-else-if="detail?.reqs?.length" type="success" variant="tonal" density="compact" class="mb-3">
+            当前等级的自动条件已全部达成 ✅<span v-if="detail.manual_blocked">;仍有人为条件需要推进</span>
+          </VAlert>
+
           <!-- 下一级条件 -->
           <VCard v-if="detail?.reqs?.length" variant="outlined" class="mb-3">
             <VCardTitle class="text-subtitle-2 d-flex align-center">
@@ -579,20 +674,41 @@ onMounted(() => loadSites(true))
           <VCard v-if="detail?.history?.length" variant="outlined" class="mb-3">
             <VCardTitle class="text-subtitle-2 d-flex align-center">
               <VIcon icon="mdi-chart-line" start size="18" color="primary" />
-              流量趋势(最近 {{ detail.history.length }} 天 · 来自 mp 的 siteuserdata 日快照)
+              流量趋势
+              <VSpacer />
+              <span class="text-caption text-medium-emphasis">来自 mp 的 siteuserdata 日快照</span>
             </VCardTitle>
             <VDivider />
             <VCardText>
-              <div v-if="spark" class="mb-2">
-                <svg :viewBox="`0 0 ${spark.w} ${spark.h}`" preserveAspectRatio="none"
-                     style="width:100%;height:56px">
-                  <polyline :points="spark.points" fill="none" stroke="rgb(var(--v-theme-primary))" stroke-width="1" />
-                </svg>
-                <div class="text-caption text-medium-emphasis">
-                  上传曲线(纵轴 {{ fmtGb(spark.min) }} ~ {{ fmtGb(spark.max) }})
-                </div>
+              <div class="d-flex align-center flex-wrap ga-2 mb-2">
+                <VBtnToggle v-model="trafficMetric" density="compact" variant="outlined" divided mandatory>
+                  <VBtn v-for="m in TRAFFIC_METRICS" :key="m.key" :value="m.key" size="small">{{ m.label }}</VBtn>
+                </VBtnToggle>
+                <VSpacer />
+                <VBtnToggle v-model="trafficRange" density="compact" variant="outlined" divided mandatory>
+                  <VBtn :value="7" size="small">7 天</VBtn>
+                  <VBtn :value="14" size="small">14 天</VBtn>
+                  <VBtn :value="30" size="small">30 天</VBtn>
+                </VBtnToggle>
               </div>
-              <div class="text-caption mb-2">{{ timelineTrend }}</div>
+              <div v-if="trafficChart" class="slb-chart" @mousemove="onChartMove" @mouseleave="trafficHover = -1">
+                <svg :viewBox="`0 0 ${trafficChart.w} ${trafficChart.h}`" preserveAspectRatio="none">
+                  <polyline :points="trafficChart.points" fill="none"
+                            stroke="rgb(var(--v-theme-primary))" stroke-width="0.8"
+                            vector-effect="non-scaling-stroke" />
+                </svg>
+              </div>
+              <div class="text-caption mt-1 mb-2">
+                <template v-if="trafficHover >= 0 && trafficRows[trafficHover]">
+                  {{ trafficRows[trafficHover].day }} · {{ trafficMetricDef.label }}
+                  <b>{{ trafficMetricDef.fmt(Number(trafficRows[trafficHover][trafficMetric]) || 0) }}</b>
+                </template>
+                <span v-else-if="trafficChart" class="text-medium-emphasis">
+                  纵轴 {{ trafficMetricDef.fmt(trafficChart.min) }} ~ {{ trafficMetricDef.fmt(trafficChart.max) }}
+                  · 鼠标移到曲线上可读某天数值
+                </span>
+              </div>
+              <div class="text-caption mb-2">{{ trafficTrend }}</div>
               <VTable density="compact">
                 <thead>
                   <tr>
@@ -600,7 +716,7 @@ onMounted(() => loadSites(true))
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-for="h in detail.history.slice(-14)" :key="h.day">
+                  <tr v-for="h in trafficRows" :key="h.day">
                     <td>{{ h.day }}</td>
                     <td>{{ fmtGb(h.upload_gb) }}</td>
                     <td>{{ fmtGb(h.download_gb) }}</td>
@@ -687,6 +803,16 @@ tr.bg-primary td {
 /* 右侧页签:贴着状态条底部,与内容区用同一条分隔线 */
 .slb-tabs {
   border-top: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+}
+
+/* 流量趋势曲线:撑满宽度、鼠标可读数值 */
+.slb-chart {
+  cursor: crosshair;
+}
+.slb-chart svg {
+  display: block;
+  width: 100%;
+  height: 64px;
 }
 
 /* 左侧站点列表:可拖动 + 插入位置提示 */
