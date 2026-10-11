@@ -1,18 +1,1 @@
-{
-  "SiteLevelBoard": {
-    "name": "站点等级看板",
-    "description": "把绑定站点的等级、晋级条件、ETA(预计多久到下一级)、保号与封号风险汇成一页,附流量时间线。",
-    "labels": "站点|工具",
-    "version": "0.1.3",
-    "icon": "https://raw.githubusercontent.com/mao0824/MoviePilot-Plugins/main/icons/level-board.png",
-    "author": "Niven",
-    "level": 1,
-    "v3": true,
-    "history": {
-      "v0.1.0": "首版(阶段 1):①站点一览(当前等级/下一级/最紧条件/ETA/红线)②我的数据(每站卡:进度条、下一级条件逐条含当前值·目标·增速·预计天数、保号状态「离可封存还差 N 级 / 离永久保留还差 N 级」、保号与封号条款原文)③流量时间线(读 mp 自带 siteuserdata 每日快照,含上传/下载/分享率/魔力/做种)④风险汇总。等级规则:内置馒头/PTS/PT时间 三站阶梯快照(来源 PT-depiler,MIT,已与站点页交叉核对),PTS 支持站点页优先校验 + 顶栏取「做种积分」(该字段不在 siteuserdata,已落盘 live_history 供斜率用);ETA 用中位数斜率 + 木桶取最紧条件 + 可信度标注,「下载量」类归人为条件不参与推算。通知:「等级变化 / 风险 / ETA 阈值」三开关解耦任意组合(默认前两开)。默认每天刷新一次(cron 可配)。配置 19 项 / 4 分组 / 5 端点 / 数据页 4 按钮。",
-      "v0.1.1": "①修首次安装失败:补实现了 _PluginBase 的抽象方法 stop_service;②界面改为 **Vue 联邦组件**自定义前端(与「站点刷流」同机制):左侧站点列表(可增删 + 新增弹窗筛选)、右侧等级详情(概要/下一级条件表/等级阶梯/保号与封号条款/流量时间线含上传曲线);③后端新增 6 个前端端点(/sites /detail /track /untrack /config /config/save),/refresh 支持单站同步;看板站点存 plugindata.tracked(默认全部 mp 站点)。依赖:vue 3.5 + vuetify 3.7 + vite 5 + federation 1.4",
-      "v0.1.2": "**修「前端全部端点 404 Not Found」的真正原因:URL 前缀被拼了两遍**。宿主(MP)注入给插件组件的 `api` 客户端自带前缀(axios `baseURL: 'api/v1/'`),而对它只能传**相对 path** `plugin/SiteLevelBoard/...`(「站点刷流」等联邦插件就是如此);此前写成 `/api/v1/plugin/...`,axios 拼成 `/api/v1/api/v1/plugin/...` → 404(浏览器里看到的报错 URL 即为双前缀,可作判据)。附带两项:①错误提示改透出后端 `{success,message}`(axios 对 4xx 是抛错,此前只显示「Request failed with status code 404」);②撤销上一版误判「浏览器/代理缓存」而加的 `?_t=` 时间戳 —— MP 的 Service Worker 明确排除 `/api/v1/plugin/` 的 GET 缓存,该路径不需要缓存穿透。",
-      "v0.1.3": "左侧站点列表支持**拖拽手动排序**:①顺序存在 plugindata.tracked —— 此前 `track`/`untrack` 保存的是 `sorted(set(ids))`,顺序被抹平,`/sites` 又是按 mp 站点列表顺序输出,所以排序无处可存;现改为按存储顺序保存与返回;②新增 `POST /reorder`(端点 11→12),只接受「当前看板站点集合的一个排列」,集合对不上(列表已过期)整体忽略并回错,mp 里已删但仍留在 tracked 的 id 不参与排序、原样留在末尾;③「新增站点」改为**追加到末尾**,不再打乱既有顺序。前端用原生 HTML5 拖拽(宿主 shared 没有 vuedraggable,不为此打包新依赖),拖动时显示插入线,松手先本地生效再落库,失败回滚本地顺序。"
-    }
-  }
-}
+{}
