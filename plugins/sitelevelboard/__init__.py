@@ -25,6 +25,7 @@
   * **配置页渲染器不绑定点击事件** → 所有按钮只能放**数据页**(``events.click.api``)
 """
 
+import json
 import re
 import sqlite3
 import threading
@@ -56,6 +57,16 @@ except Exception:  # pragma: no cover
 DB_PATH = "/config/user.db"          # mp 自身库(插件就跑在 mp 容器里,直接读)
 SNAPSHOT_DATE = "2026-10-11"          # 内置等级规则快照的日期(UI 上必须显示)
 GB = 1024 ** 3                        # 站点阈值按 GiB 口径对齐 NexusPHP
+
+# 馒头 API 的 role → 等级名(与 mp 的 MTeam_sysRoleList 一致,取前 10 档)
+MROLE_NAMES = {
+    "1": "User", "2": "Power User", "3": "Elite User", "4": "Crazy User",
+    "5": "Insane User", "6": "Veteran User", "7": "Extreme User",
+    "8": "Ultimate User", "9": "Nexus Master", "10": "VIP",
+}
+
+# 体积单位 → 字节(站点页写的是 23G / 1.2T 这种)
+SIZE_UNITS = {"G": GB, "T": 1024 * GB, "M": 1024 ** 2, "K": 1024}
 
 
 # ===========================================================================
@@ -758,7 +769,14 @@ class SiteLevelBoard(_PluginBase):
         hist = self.__history(domain, 14)
         cur = hist[-1] if hist else {}
         spec = self.__spec_for(sid, site)
-        level_name = cur.get("user_level") or ""
+
+        # 站点页 / 官方 API 的实时值优先:馒头与 PT时间 的**当前等级**以它们为准
+        # (siteuserdata 只是 mp 的每日快照,可能落后)
+        live = self.__live_values(site, spec) or {}
+        if live:
+            self.__record_live(sid, live)          # 站点页取到的值也落盘 → 供斜率用
+        live_hist = self.__live_hist(sid)
+        level_name = live.get("level") or cur.get("user_level") or ""
 
         ladder = spec.get("ladder") or []
         order_now = self.__match_order(ladder, level_name)
@@ -770,13 +788,6 @@ class SiteLevelBoard(_PluginBase):
                     break
 
         reqs = []
-        live: Dict[str, Any] = {}
-        live_hist: List[Dict[str, Any]] = []
-        if next_level or order_now is not None:
-            live = self.__live_values(site, spec) or {}
-            if live:
-                self.__record_live(sid, live)      # 站点页取到的值也落盘 → 供斜率用
-            live_hist = self.__live_hist(sid)
         if next_level:
             reqs = self.__eval_level_reqs(next_level, cur, hist, spec, live, live_hist)
 
@@ -784,7 +795,7 @@ class SiteLevelBoard(_PluginBase):
         manual_blocked = any(r["eta_kind"] == "manual" and not r["met"] for r in reqs)
         progress = self.__progress(reqs)
 
-        risks = self.__risks(spec, cur, reqs, order_now, ladder, domain)
+        risks = self.__risks(spec, cur, reqs, order_now, ladder, domain, live)
         r = {
             "site_id": sid, "site_name": site.get("name"), "domain": domain,
             "level": level_name, "level_order": order_now,
@@ -793,12 +804,16 @@ class SiteLevelBoard(_PluginBase):
             "eta_days": eta_days, "confidence": confidence,
             "manual_blocked": manual_blocked, "progress": progress,
             "reqs": reqs, "risks": risks,
-            "keep_rules": [x["text"] for x in (spec.get("keep_rules") or [])],
-            "ban_rules": [x["text"] for x in (spec.get("ban_rules") or [])],
+            "keep_rules": self.__rule_texts(spec.get("keep_rules")),
+            "ban_rules": self.__rule_texts(spec.get("ban_rules")),
             "source": spec.get("source"), "snapshot_date": spec.get("snapshot_date"),
             "l1_updated": cur.get("updated_time"),
             "keep": self.__keep_status(ladder, order_now),
             "roadmap": self.__keep_roadmap(ladder, order_now, cur, hist, spec, live, live_hist),
+            # 站点侧实时信息(馒头官方 API 给的:最后登录 / 封存 / 警告)—— 白名单,不外带凭据
+            "live_extras": {k: live[k] for k in
+                            ("parked", "warned", "leech_warn", "last_login", "joined")
+                            if k in live},
         }
         return r
 
@@ -860,14 +875,17 @@ class SiteLevelBoard(_PluginBase):
                "rate_per_day": None, "rate_label": None}
 
         if key == "interval":      # 注册时长(周)
-            join = cur_row.get("join_at")
             weeks = None
-            if join:
-                try:
-                    dt = datetime.strptime(str(join)[:19], "%Y-%m-%d %H:%M:%S")
-                    weeks = (datetime.now() - dt).total_seconds() / 86400 / 7
-                except Exception:
-                    weeks = None
+            if isinstance(cur_val, (int, float)):
+                weeks = float(cur_val)                 # 站点页直接给了注册周(如 PT时间)
+            else:
+                join = cur_row.get("join_at")
+                if join:
+                    try:
+                        dt = datetime.strptime(str(join)[:19], "%Y-%m-%d %H:%M:%S")
+                        weeks = (datetime.now() - dt).total_seconds() / 86400 / 7
+                    except Exception:
+                        weeks = None
             out["current"] = round(weeks, 1) if weeks is not None else None
             if weeks is not None:
                 out["met"] = weeks >= float(target)
@@ -945,9 +963,13 @@ class SiteLevelBoard(_PluginBase):
         return round(min(vals), 3) if vals else None
 
     # ---- 风险 -------------------------------------------------------------
-    def __risks(self, spec, cur_row, reqs, order_now, ladder, domain) -> List[Dict[str, str]]:
+    def __risks(self, spec, cur_row, reqs, order_now, ladder, domain,
+                live: Optional[Dict[str, Any]] = None) -> List[Dict[str, str]]:
         risks: List[Dict[str, str]] = []
+        live = live or {}
         ratio = cur_row.get("ratio")
+        if isinstance(live.get("ratio"), (int, float)):
+            ratio = live["ratio"]                      # 站点页/API 的值比每日快照新,优先
         # ① 降级线(下一级的 demote_ratio)
         nxt = None
         if order_now is not None:
@@ -962,8 +984,29 @@ class SiteLevelBoard(_PluginBase):
         # ② 有人为条件挡路
         if any(r["eta_kind"] == "manual" and not r["met"] for r in reqs):
             risks.append({"level": "warn", "text": "有需主动推动的条件(如下载量),光等不会达成"})
+        # ③ 站点官方 API 给的账号状态(馒头有:警告 / 吸血警告 / 封存)
+        if live.get("warned"):
+            risks.append({"level": "danger", "text": "站点已对该账号发出警告(warned),请尽快处理"})
+        if live.get("leech_warn"):
+            risks.append({"level": "warn", "text": "有下载/吸血相关警告(leechWarn)"})
+        if live.get("parked"):
+            risks.append({"level": "warn", "text": "账号处于封存(parked)状态,长期不登录仍会被清理"})
         # 注:站点条款原文不在这里堆(否则汇总区一节列 10 条),而是随站点卡单独展示
         return risks
+
+    @staticmethod
+    def __rule_texts(items: Any) -> List[str]:
+        """规则条目可能是 ``{"text": ...}``(内置快照)或纯字符串(站点页解析 / 手动规则)→ 统一取文本。
+
+        2026-10-12 踩坑:站点页解析返回字符串后,``__evaluate`` 仍按 ``x["text"]`` 取,直接 TypeError,
+        整个刷新失败(馒头/PT时间 的「刷新失败:string indices must be integers」就是这个)。
+        """
+        out: List[str] = []
+        for item in (items or []):
+            text = item.get("text") if isinstance(item, dict) else item
+            if text:
+                out.append(str(text))
+        return out
 
     @staticmethod
     def __keep_status(ladder, order_now) -> Dict[str, Any]:
@@ -1005,12 +1048,18 @@ class SiteLevelBoard(_PluginBase):
         return spec
 
     def __site_page_spec(self, sid: int, site: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """站点页解析(阶段 1 只做 PTS:它的 /faq.php 有完整阶梯,顶栏有做种积分)。
+        """站点页解析:PTS 用 /faq.php 校验快照,PT时间 用等级校验页**整段重建**阶梯与条款。
 
-        其它站点页解析(PT时间 vertify_class、馒头 API)按 docs/08 阶段 3 补。
+        馒头门槛不公开(全站 SPA)→ 继续用内置快照,但当前值走官方 API(见 __live_values)。
         """
-        if sid != 4:
-            return None
+        domain = str(site.get("domain") or "").lower()
+        if sid == 4 or "ptskit" in domain:
+            return self.__pts_spec(site)
+        if "pttime" in domain:
+            return self.__pttime_spec(site)
+        return None
+
+    def __pts_spec(self, site: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         try:
             text = self.__http_get(site, str(site.get("url") or "").rstrip("/") + "/faq.php")
             if not text:
@@ -1025,6 +1074,124 @@ class SiteLevelBoard(_PluginBase):
         except Exception as e:
             logger.warn(f"【站点等级看板】PTS 站点页解析失败,回退内置快照:{e}")
             return None
+
+    def __pttime_spec(self, site: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """PT时间:等级校验页的「等级规则」段逐级列出条件,所以整段重建阶梯(不再用快照)。"""
+        try:
+            base = str(site.get("url") or "").rstrip("/")
+            flat = self.__flatten(self.__http_get(site, base + "/action.php?type=vertify_class"))
+            if not flat or "级、" not in flat:
+                return None
+            ladder = self.__parse_pttime_ladder(flat)
+            if len(ladder) < 3:
+                logger.warn("【站点等级看板】PT时间等级规则解析到的档位太少,回退内置快照")
+                return None
+            keep_rules, ban_rules, permanent_name, parkable_name = self.__pttime_rules(site)
+            for lv in ladder:
+                norm = self.__norm_level(lv["name"])
+                lv["is_parkable"] = bool(parkable_name) and norm == parkable_name
+                lv["is_permanent"] = bool(permanent_name) and norm == permanent_name
+            # 「X 及以上」→ 把标注铺到更高档位(保号档是「及以上」语义)
+            for flag, name in (("is_parkable", parkable_name), ("is_permanent", permanent_name)):
+                if not name:
+                    continue
+                hit = next((lv["order"] for lv in ladder if self.__norm_level(lv["name"]) == name), None)
+                if hit is not None:
+                    for lv in ladder:
+                        lv[flag] = lv["order"] >= hit
+            logger.info(f"【站点等级看板】PT时间站点页解析成功:{len(ladder)} 档 · "
+                        f"可封存档 {parkable_name or '?'} · 永久档 {permanent_name or '?'}")
+            return {"source": "site_page_verified", "ladder": ladder,
+                    "keep_rules": keep_rules, "ban_rules": ban_rules}
+        except Exception as e:
+            logger.warn(f"【站点等级看板】PT时间站点页解析失败,回退内置快照:{e}")
+            return None
+
+    def __parse_pttime_ladder(self, flat: str) -> List[Dict[str, Any]]:
+        """从 PT时间 等级校验页抽逐级条件:``2级、Power User(小学) 注册至少4周,且下载至少512G,且分享率大于1.05。``"""
+        header = re.compile(r"(\d+)级、\s*([A-Za-z][A-Za-z ]*?)\s*[（(]([^）)]*)[）)]\s*[:：]?")
+        hits = list(header.finditer(flat))
+        segments: Dict[int, str] = {}
+        for idx, hit in enumerate(hits):
+            order = int(hit.group(1))
+            end = hits[idx + 1].start() if idx + 1 < len(hits) else min(len(flat), hit.end() + 400)
+            # 同一档可能出现在「升级提醒」与「等级规则」两处 → 取靠后的(等级规则段更全)
+            segments[order] = flat[hit.end():end]
+        ladder: List[Dict[str, Any]] = []
+        for order, seg in sorted(segments.items()):
+            if order < 1 or order > 9:          # 0 档是降级/封禁档,10 档是捐赠贵宾 → 不进阶梯
+                continue
+            label = next((h.group(2).strip() for h in hits if int(h.group(1)) == order), "")
+            if order == 1:
+                # 1 档是「注册默认等级」;页面上那串「下载超 X、分享率高于 Y」是**无流量保护**的分档说明,
+                # 不是晋级条件 —— 收进备注,别拿它当 requirement(否则会误导进度与 ETA)
+                note = "注册默认等级"
+                if "下载量小于100G" in flat:
+                    note += ";下载量 < 100G 不参与升降级"
+                ladder.append({"order": order, "name": label or "User", "requirements": [],
+                               "demote_ratio": None, "privilege": note,
+                               "is_parkable": False, "is_permanent": False})
+                continue
+            requirements: List[Dict[str, Any]] = []
+            m = re.search(r"注册至少\s*(\d+)\s*周", seg)
+            if m:
+                requirements.append({"key": "interval", "target": float(m.group(1)), "unit": "周"})
+            m = re.search(r"下载(?:至少|超)\s*(\d+(?:\.\d+)?)\s*([KMGT])?", seg)
+            if m:
+                scale = SIZE_UNITS.get((m.group(2) or "G").upper(), GB)
+                requirements.append({"key": "download",
+                                     "target": round(float(m.group(1)) * scale / GB),
+                                     "unit": "GB"})
+            m = re.search(r"分享率(?:大于|高于)\s*([\d.]+)", seg)
+            if m:
+                requirements.append({"key": "ratio", "target": float(m.group(1)), "unit": ""})
+            m = re.search(r"分享率低于\s*([\d.]+)\s*[,，]\s*将自动降级", seg)
+            demote = float(m.group(1)) if m else None
+            m = re.search(r"获得\s*(\d+)\s*个邀请名额", seg)
+            ladder.append({
+                "order": order, "name": label or f"等级 {order}",
+                "requirements": requirements, "demote_ratio": demote,
+                "privilege": (f"升级奖励 {m.group(1)} 个邀请名额" if m else None),
+                "is_parkable": False, "is_permanent": False,
+            })
+        return ladder
+
+    def __pttime_rules(self, site: Dict[str, Any]) -> Tuple[List[str], List[str], str, str]:
+        """PT时间 /rules.php:账号保留规则(含「X 及以上」保号档)+ 封号条款。"""
+        base = str(site.get("url") or "").rstrip("/")
+        return self.__parse_pttime_rules(self.__flatten(self.__http_get(site, base + "/rules.php")))
+
+    @staticmethod
+    def __parse_pttime_rules(flat: str) -> Tuple[List[str], List[str], str, str]:
+        """把 /rules.php 的纯文本切成:保号条款 / 封号条款 / 永久保留档 / 可封存档。"""
+        keep_rules: List[str] = []
+        ban_rules: List[str] = []
+        permanent_name, parkable_name = "", ""
+        if not flat:
+            return keep_rules, ban_rules, permanent_name, parkable_name
+        section = ""
+        if "账号保留规则" in flat:
+            start = flat.find("账号保留规则")
+            section = flat[start:start + 900]
+        for item in re.findall(r"\d+\.\s*([^;；。]{4,80})", section):
+            text = re.sub(r"\s+", " ", item).strip()
+            if not text or "保留规则" in text:
+                continue
+            keep_rules.append(text)
+            m = re.search(r"([A-Za-z][A-Za-z ]*?)\s*及以上等级用户会永远保留", text)
+            if m:
+                permanent_name = SiteLevelBoard.__norm_level(m.group(1))
+            m = re.search(r"([A-Za-z][A-Za-z ]*?)\s*及以上等级用户封存账号", text)
+            if m:
+                parkable_name = SiteLevelBoard.__norm_level(m.group(1))
+        if "一切作弊" in flat:
+            start = flat.find("一切作弊")
+            tail = flat[start:start + 400]
+            for sentence in re.split(r"[。!！]", tail):
+                text = re.sub(r"\s+", " ", sentence).strip()
+                if len(text) >= 4 and any(k in text for k in ("作弊", "禁止", "被封", "上传到其他")):
+                    ban_rules.append(text)
+        return keep_rules, ban_rules, permanent_name, parkable_name
 
     # ---- 手动规则解析 -----------------------------------------------------
     def __manual_spec(self, sid: int) -> Optional[Dict[str, Any]]:
@@ -1124,7 +1291,7 @@ class SiteLevelBoard(_PluginBase):
         try:
             con = self.__conn()
             rows = [dict(r) for r in con.execute(
-                "select id,name,domain,url,is_active,proxy from site order by id")]
+                "select id,name,domain,url,is_active,proxy,apikey from site order by id")]
             con.close()
             return rows
         except Exception as e:
@@ -1167,39 +1334,150 @@ class SiteLevelBoard(_PluginBase):
         except Exception:
             return []
 
-    # ---- 站点页取当前值(PTS 顶栏:做种积分等 siteuserdata 没有的字段)------
+    # ---- 站点页 / 官方 API 取当前值 ---------------------------------------
     def __live_values(self, site: Dict[str, Any], spec: Dict[str, Any]) -> Dict[str, Any]:
-        if not self._use_site_page or int(site.get("id")) != 4:
+        """取「权威当前值」:PTS 顶栏、馒头官方 API、PT时间 等级校验页。
+
+        取不到就返回 {},调用方一律回落到 mp 的 siteuserdata(站点改版也不会把看板搞崩)。
+        """
+        if not self._use_site_page:
             return {}
+        domain = str(site.get("domain") or "").lower()
         try:
-            text = self.__http_get(site, str(site.get("url") or "").rstrip("/") + "/index.php")
-            if not text:
-                return {}
-            flat = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", text))
-            out = {}
-            m = re.search(r"做种积分\s*([\d.]+)", flat)
-            if m:
-                out["seeding_bonus"] = float(m.group(1))
-            m = re.search(r"分享率[:：]\s*([\d.]+)", flat)
-            if m:
-                out["ratio"] = float(m.group(1))
-            m = re.search(r"魔力值\s*\[\s*使用\s*\]\s*[:：]\s*([\d.]+)", flat)
-            if m:
-                out["bonus"] = float(m.group(1))
-            return out
+            if int(site.get("id") or 0) == 4 or "ptskit" in domain:
+                return self.__live_pts(site)
+            if "m-team" in domain:
+                return self.__live_mteam(site)
+            if "pttime" in domain:
+                return self.__live_pttime(site)
         except Exception as e:
-            logger.warn(f"【站点等级看板】读取 PTS 顶栏失败:{e}")
+            logger.warn(f"【站点等级看板】读取 {site.get('name')} 站点页/API 失败(回落 siteuserdata):{e}")
+        return {}
+
+    @staticmethod
+    def __flatten(html: str) -> str:
+        return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html or "").replace("&nbsp;", " "))
+
+    def __live_pts(self, site: Dict[str, Any]) -> Dict[str, Any]:
+        text = self.__http_get(site, str(site.get("url") or "").rstrip("/") + "/index.php")
+        if not text:
             return {}
+        flat = self.__flatten(text)
+        out: Dict[str, Any] = {}
+        m = re.search(r"做种积分\s*([\d.]+)", flat)
+        if m:
+            out["seeding_bonus"] = float(m.group(1))
+        m = re.search(r"分享率[:：]\s*([\d.]+)", flat)
+        if m:
+            out["ratio"] = float(m.group(1))
+        m = re.search(r"魔力值\s*\[\s*使用\s*\]\s*[:：]\s*([\d.]+)", flat)
+        if m:
+            out["bonus"] = float(m.group(1))
+        return out
+
+    def __live_mteam(self, site: Dict[str, Any]) -> Dict[str, Any]:
+        """馒头官方 API(apikey 只能访问 profile;等级/门槛类端点要用户级 JWT,拿不到)。
+
+        ⚠️ 必须发 JSON 体 `{}` —— 空 body 会回 `code:1 請求參數錯誤`(2026-10-11 实测)。
+        """
+        key = str(site.get("apikey") or "").strip()
+        if not key:
+            logger.warn("【站点等级看板】馒头未配置 apikey,跳过官方 API(回落 siteuserdata)")
+            return {}
+        payload = self.__http_post_json(site, "https://api.m-team.cc/api/member/profile", {},
+                                       {"x-api-key": key})
+        data = (payload or {}).get("data") or {}
+        if not data:
+            logger.warn(f"【站点等级看板】馒头 API 无 data:{(payload or {}).get('message')}")
+            return {}
+        out: Dict[str, Any] = {}
+        role = str(data.get("role") or "")
+        if role:
+            out["level"] = MROLE_NAMES.get(role, f"角色 {role}")
+        out["parked"] = bool(data.get("parked"))
+        count = data.get("memberCount") or {}
+        for src_key, dst_key in (("uploaded", "upload"), ("downloaded", "download")):
+            raw = count.get(src_key)
+            if raw not in (None, ""):
+                out[dst_key] = float(raw)              # 字节
+        if count.get("shareRate") not in (None, ""):
+            out["ratio"] = float(count["shareRate"])
+        if count.get("bonus") not in (None, ""):
+            out["bonus"] = float(count["bonus"])
+        if data.get("seedtime") not in (None, ""):
+            out["seedtime_hours"] = round(float(data["seedtime"]) / 3600, 1)
+        status = data.get("memberStatus") or {}
+        for flag, dst in (("warned", "warned"), ("leechWarn", "leech_warn")):
+            if status.get(flag):
+                out[dst] = True
+        if status.get("createdDate"):
+            out["joined"] = status["createdDate"]
+        if status.get("lastLogin"):
+            out["last_login"] = status["lastLogin"]
+        # 注:MT 的 seedtime(2791701187)单位不明(按秒算是 88 年),mp 自己也不换算 → 不展示、不参与判据
+        logger.info(f"【站点等级看板】馒头 API 成功:等级 {out.get('level')}(role {role})"
+                    f"{'、封存中' if out.get('parked') else ''}"
+                    f"{'、有警告' if out.get('warned') else ''}")
+        return out
+
+    def __live_pttime(self, site: Dict[str, Any]) -> Dict[str, Any]:
+        """PT时间等级校验页:同一页给出「目前等级应为」与 注册周/下载量/分享率/上传量。"""
+        url = str(site.get("url") or "").rstrip("/") + "/action.php?type=vertify_class"
+        html = self.__http_get(site, url)
+        if not html:
+            return {}
+        flat = self.__flatten(html)
+        out: Dict[str, Any] = {}
+        m = re.search(r"目前等级应为[:：]\s*(?:[（(][^）)]*[）)]\s*)?([A-Za-z][A-Za-z ]*)", flat)
+        if m:
+            out["level"] = m.group(1).strip()
+        m = re.search(r"注册周[:：]\s*([\d.]+)\s*周", flat)
+        if m:
+            out["interval"] = float(m.group(1))     # 与阶梯里 interval 条件的口径一致(周)
+        m = re.search(r"注册于\s*(\d{4}-\d{2}-\d{2})", flat)
+        if m:
+            out["joined"] = m.group(1)
+        for label, key in (("下载量", "download"), ("上传量", "upload")):
+            m = re.search(label + r"[:：]\s*([\d.]+)\s*([KMGT])", flat)
+            if m:
+                out[key] = float(m.group(1)) * SIZE_UNITS.get(m.group(2).upper(), 1)
+        m = re.search(r"分享率[:：]\s*([\d.]+)", flat)
+        if m:
+            out["ratio"] = float(m.group(1))
+        if out:
+            logger.info(f"【站点等级看板】PT时间等级校验页成功:等级 {out.get('level')}")
+        return out
 
     def __http_get(self, site: Dict[str, Any], url: str) -> str:
+        return self.__http_request(site, url, "GET")
+
+    def __http_post_json(self, site: Dict[str, Any], url: str, payload: Dict[str, Any],
+                         extra_headers: Optional[Dict[str, str]] = None) -> Optional[Dict[str, Any]]:
+        text = self.__http_request(site, url, "POST", json_body=payload, extra_headers=extra_headers)
+        if not text:
+            return None
+        try:
+            return json.loads(text)
+        except ValueError:
+            logger.warn(f"【站点等级看板】{site.get('name')} 返回的不是 JSON:{text[:120]}")
+            return None
+
+    def __http_request(self, site: Dict[str, Any], url: str, method: str = "GET",
+                       json_body: Optional[Dict[str, Any]] = None,
+                       extra_headers: Optional[Dict[str, str]] = None) -> str:
         con = self.__conn()
         row = con.execute("select cookie,ua,proxy,render,timeout from site where id=?",
                           (int(site["id"]),)).fetchone()
         con.close()
-        if not row or not row["cookie"]:
+        if not row:
             return ""
         headers = {"User-Agent": row["ua"] or "Mozilla/5.0"}
+        if extra_headers:
+            headers.update(extra_headers)
         ck = dict(x.split("=", 1) for x in str(row["cookie"]).split("; ") if "=" in x)
+        # 带自定义头的调用 = 官方 API(靠 apikey 认证,域名也不同),不带站点 cookie
+        if not ck and not extra_headers:
+            return ""
         proxies = None
         if row["proxy"]:
             try:
@@ -1207,24 +1485,37 @@ class SiteLevelBoard(_PluginBase):
                 proxies = settings.PROXY or None       # ⚠️ settings.PROXY 已是 dict
             except Exception:
                 proxies = None
-        r = requests.get(url, headers=headers, cookies=ck, proxies=proxies,
-                         timeout=int(row["timeout"] or self._timeout))
-        return r.text if r.status_code == 200 else ""
+        kwargs: Dict[str, Any] = {"headers": headers, "proxies": proxies,
+                                  "timeout": int(row["timeout"] or self._timeout)}
+        if ck and not extra_headers:
+            kwargs["cookies"] = ck
+        if method == "POST":
+            headers.setdefault("Content-Type", "application/json")
+            response = requests.post(url, json=json_body if json_body is not None else {}, **kwargs)
+        else:
+            response = requests.get(url, **kwargs)
+        return response.text if response.status_code == 200 else ""
 
     # =====================================================================
     # 等级匹配 / 斜率
     # =====================================================================
     @staticmethod
+    def __norm_level(name: str) -> str:
+        """等级名归一化:去掉站点加的中文档位前缀,再比大小 —— 如 ``(幼儿园)User`` → ``user``。"""
+        text = re.sub(r"[（(][^）)]*[）)]", "", str(name or ""))
+        return re.sub(r"\s+", " ", text).strip().lower()
+
+    @staticmethod
     def __match_order(ladder: List[Dict[str, Any]], level_name: str) -> Optional[int]:
         if not level_name:
             return None
-        name = str(level_name).strip().lower()
+        name = SiteLevelBoard.__norm_level(level_name)
         for lv in ladder:
-            if str(lv.get("name", "")).strip().lower() == name:
+            if SiteLevelBoard.__norm_level(lv.get("name")) == name:
                 return lv["order"]
-        # 容错:站点可能写作 "Crazy User (Crazy)" 之类
+        # 容错:站点可能写作 "Crazy User (Crazy)" / "(幼儿园)User" 之类
         for lv in ladder:
-            if str(lv.get("name", "")).strip().lower() in name:
+            if SiteLevelBoard.__norm_level(lv.get("name")) in name:
                 return lv["order"]
         return None
 

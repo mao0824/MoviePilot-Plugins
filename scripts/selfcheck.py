@@ -183,6 +183,12 @@ def main() -> int:
     check("需人为推动不计入 ETA",
           site_eta([{"met": False, "eta_kind": "manual", "eta_days": 5}], {}, hist14)[0] is None)
 
+    print("[8] 规则条目两种形态都能取到文本")
+    rule_texts = instance._SiteLevelBoard__rule_texts       # 快照给 {"text": ...},站点页给字符串
+    check("字符串直接取", rule_texts(["a", "b"]) == ["a", "b"])
+    check("{text} 取字段", rule_texts([{"text": "x"}, {"text": "y"}]) == ["x", "y"])
+    check("混合 + 脏值安全", rule_texts(["a", {"text": "b"}, {}, None]) == ["a", "b"])
+
     print()
     if FAILED:
         print(f"未通过 {len(FAILED)} 项:{FAILED}")

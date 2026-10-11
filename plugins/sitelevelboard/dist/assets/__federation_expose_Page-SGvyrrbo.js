@@ -40,60 +40,64 @@ const _hoisted_10 = { class: "text-h6" };
 const _hoisted_11 = { class: "text-caption text-medium-emphasis" };
 const _hoisted_12 = { key: 0 };
 const _hoisted_13 = { key: 0 };
-const _hoisted_14 = { class: "mb-1 font-weight-medium" };
-const _hoisted_15 = { class: "text-caption text-medium-emphasis" };
-const _hoisted_16 = { key: 0 };
+const _hoisted_14 = {
+  key: 1,
+  class: "text-caption text-medium-emphasis"
+};
+const _hoisted_15 = { class: "mb-1 font-weight-medium" };
+const _hoisted_16 = { class: "text-caption text-medium-emphasis" };
 const _hoisted_17 = { key: 0 };
-const _hoisted_18 = { key: 1 };
-const _hoisted_19 = { key: 2 };
-const _hoisted_20 = { key: 0 };
-const _hoisted_21 = { class: "d-flex align-center flex-wrap" };
-const _hoisted_22 = { class: "ml-1 text-medium-emphasis" };
-const _hoisted_23 = { class: "text-caption" };
-const _hoisted_24 = {
+const _hoisted_18 = { key: 0 };
+const _hoisted_19 = { key: 1 };
+const _hoisted_20 = { key: 2 };
+const _hoisted_21 = { key: 0 };
+const _hoisted_22 = { class: "d-flex align-center flex-wrap" };
+const _hoisted_23 = { class: "ml-1 text-medium-emphasis" };
+const _hoisted_24 = { class: "text-caption" };
+const _hoisted_25 = {
   key: 0,
   class: "text-caption text-warning ml-5"
 };
-const _hoisted_25 = {
+const _hoisted_26 = {
   key: 0,
   class: "text-medium-emphasis mb-2"
 };
-const _hoisted_26 = {
+const _hoisted_27 = {
   key: 1,
   class: "text-medium-emphasis"
 };
-const _hoisted_27 = {
+const _hoisted_28 = {
   key: 0,
   class: "text-medium-emphasis"
 };
-const _hoisted_28 = { class: "mr-1" };
-const _hoisted_29 = { key: 0 };
-const _hoisted_30 = { key: 1 };
-const _hoisted_31 = { class: "text-caption" };
-const _hoisted_32 = {
+const _hoisted_29 = { class: "mr-1" };
+const _hoisted_30 = { key: 0 };
+const _hoisted_31 = { key: 1 };
+const _hoisted_32 = { class: "text-caption" };
+const _hoisted_33 = {
   key: 0,
   class: "text-medium-emphasis"
 };
-const _hoisted_33 = { key: 1 };
-const _hoisted_34 = {
+const _hoisted_34 = { key: 1 };
+const _hoisted_35 = {
   key: 2,
   class: "text-error"
 };
-const _hoisted_35 = { class: "text-caption" };
-const _hoisted_36 = { class: "d-flex align-center flex-wrap ga-2 mb-2" };
-const _hoisted_37 = ["viewBox"];
-const _hoisted_38 = ["points"];
-const _hoisted_39 = { class: "text-caption mt-1 mb-2" };
-const _hoisted_40 = {
+const _hoisted_36 = { class: "text-caption" };
+const _hoisted_37 = { class: "d-flex align-center flex-wrap ga-2 mb-2" };
+const _hoisted_38 = ["viewBox"];
+const _hoisted_39 = ["points"];
+const _hoisted_40 = { class: "text-caption mt-1 mb-2" };
+const _hoisted_41 = {
   key: 1,
   class: "text-medium-emphasis"
 };
-const _hoisted_41 = { class: "text-caption mb-2" };
-const _hoisted_42 = {
+const _hoisted_42 = { class: "text-caption mb-2" };
+const _hoisted_43 = {
   key: 0,
   class: "text-caption text-medium-emphasis"
 };
-const _hoisted_43 = { class: "text-caption text-medium-emphasis ml-2" };
+const _hoisted_44 = { class: "text-caption text-medium-emphasis ml-2" };
 
 const {computed,onMounted,ref} = await importShared('vue');
 
@@ -464,6 +468,18 @@ const riskSummary = computed(() => ({
   danger: tracked.value.filter(s => s.risk === 'danger'),
   warn: tracked.value.filter(s => s.risk === 'warn'),
 }));
+
+/** 站点侧实时信息(目前来自馒头官方 API):最后登录 / 封存 / 警告。 */
+const liveExtraText = computed(() => {
+  const x = detail.value?.live_extras || {};
+  const parts = [];
+  if (x.joined) parts.push(`注册于 ${String(x.joined).slice(0, 10)}`);
+  if (x.last_login) parts.push(`最后登录 ${String(x.last_login).slice(0, 16)}`);
+  if ('parked' in x) parts.push(x.parked ? '已封存' : '未封存');
+  if (x.warned) parts.push('⚠️ 有警告');
+  if (x.leech_warn) parts.push('⚠️ 有下载警告');
+  return parts.join(' · ')
+});
 
 /** 保号路线图(后端 roadmap:到「可封存 / 永久保留」档还差几级、照当前增速多久、卡在哪)。 */
 const roadmapRows = computed(() => {
@@ -944,7 +960,10 @@ return (_ctx, _cache) => {
                                     _createTextVNode(" · siteuserdata 更新于 " + _toDisplayString(detail.value.l1_updated || '-'), 1)
                                   ]))
                                 : _createCommentVNode("", true)
-                            ])
+                            ]),
+                            (liveExtraText.value)
+                              ? (_openBlock(), _createElementBlock("div", _hoisted_14, " 🌐 站点侧实时:" + _toDisplayString(liveExtraText.value), 1))
+                              : _createCommentVNode("", true)
                           ]),
                           _: 1
                         }),
@@ -1021,8 +1040,8 @@ return (_ctx, _cache) => {
                                   _createVNode(_component_VDivider),
                                   _createVNode(_component_VCardText, { class: "text-body-2" }, {
                                     default: _withCtx(() => [
-                                      _createElementVNode("div", _hoisted_14, _toDisplayString(tightest.value.label), 1),
-                                      _createElementVNode("div", _hoisted_15, [
+                                      _createElementVNode("div", _hoisted_15, _toDisplayString(tightest.value.label), 1),
+                                      _createElementVNode("div", _hoisted_16, [
                                         _createTextVNode(" 当前 " + _toDisplayString(tightest.value.current === null ? '取不到' : _unref(fmtNum)(tightest.value.current) + tightest.value.unit) + " → 目标 " + _toDisplayString(_unref(fmtNum)(tightest.value.target)) + _toDisplayString(tightest.value.unit) + " ", 1),
                                         (typeof tightest.value.current === 'number' && tightest.value.target)
                                           ? (_openBlock(), _createElementBlock(_Fragment, { key: 0 }, [
@@ -1050,7 +1069,7 @@ return (_ctx, _cache) => {
                                   default: _withCtx(() => [
                                     _cache[32] || (_cache[32] = _createTextVNode(" 当前等级的自动条件已全部达成 ✅", -1)),
                                     (detail.value.manual_blocked)
-                                      ? (_openBlock(), _createElementBlock("span", _hoisted_16, ";仍有人为条件需要推进"))
+                                      ? (_openBlock(), _createElementBlock("span", _hoisted_17, ";仍有人为条件需要推进"))
                                       : _createCommentVNode("", true)
                                   ]),
                                   _: 1
@@ -1105,10 +1124,10 @@ return (_ctx, _cache) => {
                                             _createElementVNode("td", null, _toDisplayString(r.current === null ? '取不到' : _unref(fmtNum)(r.current) + r.unit), 1),
                                             _createElementVNode("td", null, [
                                               (r.met)
-                                                ? (_openBlock(), _createElementBlock("span", _hoisted_17, "已达成"))
+                                                ? (_openBlock(), _createElementBlock("span", _hoisted_18, "已达成"))
                                                 : (r.eta_days !== null && r.eta_days !== undefined)
-                                                  ? (_openBlock(), _createElementBlock("span", _hoisted_18, _toDisplayString(r.rate_label || '') + " → " + _toDisplayString(_unref(fmtEta)(r.eta_days)), 1))
-                                                  : (_openBlock(), _createElementBlock("span", _hoisted_19, _toDisplayString(r.rate_label || (r.eta_kind === 'manual' ? '需人为推动' : '趋势不足')), 1))
+                                                  ? (_openBlock(), _createElementBlock("span", _hoisted_19, _toDisplayString(r.rate_label || '') + " → " + _toDisplayString(_unref(fmtEta)(r.eta_days)), 1))
+                                                  : (_openBlock(), _createElementBlock("span", _hoisted_20, _toDisplayString(r.rate_label || (r.eta_kind === 'manual' ? '需人为推动' : '趋势不足')), 1))
                                             ])
                                           ], 2))
                                         }), 128))
@@ -1161,13 +1180,13 @@ return (_ctx, _cache) => {
                                       _createVNode(_component_VCardText, { class: "text-body-2" }, {
                                         default: _withCtx(() => [
                                           (detail.value)
-                                            ? (_openBlock(), _createElementBlock("div", _hoisted_20, [
+                                            ? (_openBlock(), _createElementBlock("div", _hoisted_21, [
                                                 (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(roadmapRows.value, (row) => {
                                                   return (_openBlock(), _createElementBlock("div", {
                                                     key: row.key,
                                                     class: "mb-2"
                                                   }, [
-                                                    _createElementVNode("div", _hoisted_21, [
+                                                    _createElementVNode("div", _hoisted_22, [
                                                       _createVNode(_component_VIcon, {
                                                         icon: row.icon,
                                                         size: "16",
@@ -1175,17 +1194,17 @@ return (_ctx, _cache) => {
                                                         class: "mr-1"
                                                       }, null, 8, ["icon", "color"]),
                                                       _createElementVNode("b", null, _toDisplayString(row.label), 1),
-                                                      _createElementVNode("span", _hoisted_22, _toDisplayString(roadmapAway(row.data)), 1),
+                                                      _createElementVNode("span", _hoisted_23, _toDisplayString(roadmapAway(row.data)), 1),
                                                       _createVNode(_component_VSpacer),
-                                                      _createElementVNode("span", _hoisted_23, _toDisplayString(roadmapEta(row.data)), 1)
+                                                      _createElementVNode("span", _hoisted_24, _toDisplayString(roadmapEta(row.data)), 1)
                                                     ]),
                                                     (roadmapBlocker(row.data))
-                                                      ? (_openBlock(), _createElementBlock("div", _hoisted_24, " 卡点:" + _toDisplayString(roadmapBlocker(row.data)), 1))
+                                                      ? (_openBlock(), _createElementBlock("div", _hoisted_25, " 卡点:" + _toDisplayString(roadmapBlocker(row.data)), 1))
                                                       : _createCommentVNode("", true)
                                                   ]))
                                                 }), 128)),
                                                 (!roadmapRows.value.length)
-                                                  ? (_openBlock(), _createElementBlock("div", _hoisted_25, " 该站规则里没有保号档信息(仍可看下面的条款原文) "))
+                                                  ? (_openBlock(), _createElementBlock("div", _hoisted_26, " 该站规则里没有保号档信息(仍可看下面的条款原文) "))
                                                   : _createCommentVNode("", true),
                                                 _createVNode(_component_VDivider, { class: "my-2" }),
                                                 (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(detail.value.keep_rules || [], (t, i) => {
@@ -1194,7 +1213,7 @@ return (_ctx, _cache) => {
                                                   }, "✅ " + _toDisplayString(t), 1))
                                                 }), 128)),
                                                 (!(detail.value.keep_rules || []).length)
-                                                  ? (_openBlock(), _createElementBlock("div", _hoisted_26, "站点未提供保号条款"))
+                                                  ? (_openBlock(), _createElementBlock("div", _hoisted_27, "站点未提供保号条款"))
                                                   : _createCommentVNode("", true)
                                               ]))
                                             : _createCommentVNode("", true)
@@ -1239,7 +1258,7 @@ return (_ctx, _cache) => {
                                             }, "⛔ " + _toDisplayString(t), 1))
                                           }), 128)),
                                           (!detail.value?.ban_rules?.length)
-                                            ? (_openBlock(), _createElementBlock("div", _hoisted_27, " 站点未提供(或不在公开页面)——请以站点公告为准 "))
+                                            ? (_openBlock(), _createElementBlock("div", _hoisted_28, " 站点未提供(或不在公开页面)——请以站点公告为准 "))
                                             : _createCommentVNode("", true),
                                           (detail.value?.risks?.length)
                                             ? (_openBlock(), _createElementBlock(_Fragment, { key: 1 }, [
@@ -1305,13 +1324,13 @@ return (_ctx, _cache) => {
                                               class: _normalizeClass({ 'bg-primary': lv.order === detail.value.level_order, 'font-weight-bold': lv.order === detail.value.next_order })
                                             }, [
                                               _createElementVNode("td", null, [
-                                                _createElementVNode("span", _hoisted_28, _toDisplayString(lv.order), 1),
+                                                _createElementVNode("span", _hoisted_29, _toDisplayString(lv.order), 1),
                                                 _createTextVNode(_toDisplayString(lv.name) + " ", 1),
                                                 (lv.is_permanent)
-                                                  ? (_openBlock(), _createElementBlock("span", _hoisted_29, "🏅"))
+                                                  ? (_openBlock(), _createElementBlock("span", _hoisted_30, "🏅"))
                                                   : _createCommentVNode("", true),
                                                 (lv.is_parkable)
-                                                  ? (_openBlock(), _createElementBlock("span", _hoisted_30, "🔒"))
+                                                  ? (_openBlock(), _createElementBlock("span", _hoisted_31, "🔒"))
                                                   : _createCommentVNode("", true),
                                                 (lv.order === detail.value.level_order)
                                                   ? (_openBlock(), _createBlock(_component_VChip, {
@@ -1339,15 +1358,15 @@ return (_ctx, _cache) => {
                                                       }))
                                                     : _createCommentVNode("", true)
                                               ]),
-                                              _createElementVNode("td", _hoisted_31, [
+                                              _createElementVNode("td", _hoisted_32, [
                                                 (!lv.requirements.length)
-                                                  ? (_openBlock(), _createElementBlock("span", _hoisted_32, "默认/无自动条件"))
-                                                  : (_openBlock(), _createElementBlock("span", _hoisted_33, _toDisplayString(lv.requirements.map(r => r.label).join(' · ')), 1)),
+                                                  ? (_openBlock(), _createElementBlock("span", _hoisted_33, "默认/无自动条件"))
+                                                  : (_openBlock(), _createElementBlock("span", _hoisted_34, _toDisplayString(lv.requirements.map(r => r.label).join(' · ')), 1)),
                                                 (lv.demote_ratio)
-                                                  ? (_openBlock(), _createElementBlock("span", _hoisted_34, " (分享率 < " + _toDisplayString(lv.demote_ratio) + " 降级)", 1))
+                                                  ? (_openBlock(), _createElementBlock("span", _hoisted_35, " (分享率 < " + _toDisplayString(lv.demote_ratio) + " 降级)", 1))
                                                   : _createCommentVNode("", true)
                                               ]),
-                                              _createElementVNode("td", _hoisted_35, _toDisplayString(lv.privilege || '-'), 1)
+                                              _createElementVNode("td", _hoisted_36, _toDisplayString(lv.privilege || '-'), 1)
                                             ], 2))
                                           }), 128))
                                         ])
@@ -1394,7 +1413,7 @@ return (_ctx, _cache) => {
                                     _createVNode(_component_VDivider),
                                     _createVNode(_component_VCardText, null, {
                                       default: _withCtx(() => [
-                                        _createElementVNode("div", _hoisted_36, [
+                                        _createElementVNode("div", _hoisted_37, [
                                           _createVNode(_component_VBtnToggle, {
                                             modelValue: trafficMetric.value,
                                             "onUpdate:modelValue": _cache[2] || (_cache[2] = $event => ((trafficMetric).value = $event)),
@@ -1477,21 +1496,21 @@ return (_ctx, _cache) => {
                                                   stroke: "rgb(var(--v-theme-primary))",
                                                   "stroke-width": "0.8",
                                                   "vector-effect": "non-scaling-stroke"
-                                                }, null, 8, _hoisted_38)
-                                              ], 8, _hoisted_37))
+                                                }, null, 8, _hoisted_39)
+                                              ], 8, _hoisted_38))
                                             ], 32))
                                           : _createCommentVNode("", true),
-                                        _createElementVNode("div", _hoisted_39, [
+                                        _createElementVNode("div", _hoisted_40, [
                                           (trafficHover.value >= 0 && trafficRows.value[trafficHover.value])
                                             ? (_openBlock(), _createElementBlock(_Fragment, { key: 0 }, [
                                                 _createTextVNode(_toDisplayString(trafficRows.value[trafficHover.value].day) + " · " + _toDisplayString(trafficMetricDef.value.label) + " ", 1),
                                                 _createElementVNode("b", null, _toDisplayString(trafficMetricDef.value.fmt(Number(trafficRows.value[trafficHover.value][trafficMetric.value]) || 0)), 1)
                                               ], 64))
                                             : (trafficChart.value)
-                                              ? (_openBlock(), _createElementBlock("span", _hoisted_40, " 纵轴 " + _toDisplayString(trafficMetricDef.value.fmt(trafficChart.value.min)) + " ~ " + _toDisplayString(trafficMetricDef.value.fmt(trafficChart.value.max)) + " · 鼠标移到曲线上可读某天数值 ", 1))
+                                              ? (_openBlock(), _createElementBlock("span", _hoisted_41, " 纵轴 " + _toDisplayString(trafficMetricDef.value.fmt(trafficChart.value.min)) + " ~ " + _toDisplayString(trafficMetricDef.value.fmt(trafficChart.value.max)) + " · 鼠标移到曲线上可读某天数值 ", 1))
                                               : _createCommentVNode("", true)
                                         ]),
-                                        _createElementVNode("div", _hoisted_41, _toDisplayString(trafficTrend.value), 1),
+                                        _createElementVNode("div", _hoisted_42, _toDisplayString(trafficTrend.value), 1),
                                         _createVNode(_component_VTable, { density: "compact" }, {
                                           default: _withCtx(() => [
                                             _cache[48] || (_cache[48] = _createElementVNode("thead", null, [
@@ -1582,7 +1601,7 @@ return (_ctx, _cache) => {
                     class: "mb-3"
                   }, null, 8, ["modelValue"]),
                   (!filteredCandidates.value.length)
-                    ? (_openBlock(), _createElementBlock("div", _hoisted_42, " 没有可添加的站点(要么都已在看板里,要么 mp 里还没绑定站点) "))
+                    ? (_openBlock(), _createElementBlock("div", _hoisted_43, " 没有可添加的站点(要么都已在看板里,要么 mp 里还没绑定站点) "))
                     : (_openBlock(), _createBlock(_component_VList, {
                         key: 1,
                         density: "compact",
@@ -1628,7 +1647,7 @@ return (_ctx, _cache) => {
               _createVNode(_component_VDivider),
               _createVNode(_component_VCardActions, null, {
                 default: _withCtx(() => [
-                  _createElementVNode("div", _hoisted_43, "已选 " + _toDisplayString(addSelected.value.length) + " 个", 1),
+                  _createElementVNode("div", _hoisted_44, "已选 " + _toDisplayString(addSelected.value.length) + " 个", 1),
                   _createVNode(_component_VSpacer),
                   _createVNode(_component_VBtn, {
                     variant: "text",
@@ -1799,6 +1818,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-22affc2a"]]);
+const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-845752a6"]]);
 
 export { Page as default };

@@ -366,6 +366,18 @@ const riskSummary = computed(() => ({
   warn: tracked.value.filter(s => s.risk === 'warn'),
 }))
 
+/** 站点侧实时信息(目前来自馒头官方 API):最后登录 / 封存 / 警告。 */
+const liveExtraText = computed(() => {
+  const x = detail.value?.live_extras || {}
+  const parts = []
+  if (x.joined) parts.push(`注册于 ${String(x.joined).slice(0, 10)}`)
+  if (x.last_login) parts.push(`最后登录 ${String(x.last_login).slice(0, 16)}`)
+  if ('parked' in x) parts.push(x.parked ? '已封存' : '未封存')
+  if (x.warned) parts.push('⚠️ 有警告')
+  if (x.leech_warn) parts.push('⚠️ 有下载警告')
+  return parts.join(' · ')
+})
+
 /** 保号路线图(后端 roadmap:到「可封存 / 永久保留」档还差几级、照当前增速多久、卡在哪)。 */
 const roadmapRows = computed(() => {
   const rm = detail.value?.roadmap || {}
@@ -586,6 +598,9 @@ onMounted(() => loadSites(true))
                   <span v-if="detail.source === 'ptd_snapshot'">(快照 {{ detail.snapshot_date }})</span>
                   · siteuserdata 更新于 {{ detail.l1_updated || '-' }}
                 </span>
+              </div>
+              <div v-if="liveExtraText" class="text-caption text-medium-emphasis">
+                🌐 站点侧实时:{{ liveExtraText }}
               </div>
             </VCardText>
             <VTabs v-model="activeTab" color="primary" density="comfortable" class="slb-tabs">
