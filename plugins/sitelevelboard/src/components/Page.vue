@@ -427,6 +427,19 @@ function etaText(site) {
   return `${fmtEta(site.eta_days)}(${CONFIDENCE_LABEL[site.confidence] || '?'})`
 }
 
+/**
+ * 进度条右侧那句「卡点」:百分比只说明差多少,说清「最紧的是哪一项、当前/目标」才知道该往哪使劲。
+ * 口径与后端 __progress 一致(复用已有的 tightest 计算属性)。
+ */
+const tightestText = computed(() => {
+  const r = tightest.value
+  if (!r) return ''
+  const label = r.label || '-'
+  const target = fmtNum(r.target) + (r.unit || '')
+  const current = (r.current === null || r.current === undefined) ? null : fmtNum(r.current)
+  return current === null ? label : label + ' ' + current + '/' + target
+})
+
 onMounted(() => loadSites(true))
 </script>
 
@@ -533,40 +546,50 @@ onMounted(() => loadSites(true))
         <template v-else>
           <!-- 常驻状态条:站点名 / 等级 → 下一级 / ETA / 进度;页签只切下半部分 -->
           <VCard variant="outlined" class="mb-3">
-            <VCardText class="pb-0">
-              <div class="d-flex align-center flex-wrap ga-2 mb-2">
-                <span class="text-h6">{{ detail?.site_name || current?.name }}</span>
-                <VChip color="primary" variant="tonal">{{ detail?.level || '?' }}</VChip>
-                <VIcon icon="mdi-arrow-right" size="18" />
-                <VChip variant="outlined">{{ detail?.next_level || '未知/已最高' }}</VChip>
-                <VChip v-if="detail" :color="detail.manual_blocked ? 'warning' : 'success'" variant="tonal">
-                  {{ etaText(detail) }}
-                </VChip>
-                <VSpacer />
-                <VBtn size="x-small" variant="text" prepend-icon="mdi-refresh" :loading="busy" @click="refreshOne">
-                  刷新本站
-                </VBtn>
-                <VBtn v-if="detail?.site_url" size="x-small" variant="text" prepend-icon="mdi-open-in-new"
-                      :href="detail.site_url" target="_blank">打开站点</VBtn>
-              </div>
-              <VProgressLinear
-                v-if="detail && detail.progress_pct !== null && detail.progress_pct !== undefined"
-                :model-value="detail.progress_pct"
-                height="10"
-                rounded
-                color="primary"
-                class="mb-2"
-              />
-              <div class="text-caption text-medium-emphasis">
-                <span v-if="detail">
-                  晋级进度按「最紧条件」计 {{ detail.progress_pct ?? 0 }}%
-                  · 数据来源:{{ SOURCE_LABEL[detail.source] || detail.source || '-' }}
-                  <span v-if="detail.source === 'ptd_snapshot'">(快照 {{ detail.snapshot_date }})</span>
-                  · siteuserdata 更新于 {{ detail.l1_updated || '-' }}
+            <div class="d-flex align-center flex-wrap ga-2 pa-4 pb-2">
+              <span class="text-h6">{{ detail?.site_name || current?.name }}</span>
+              <VChip color="primary" variant="tonal" size="small">{{ detail?.level || '?' }}</VChip>
+              <VIcon icon="mdi-arrow-right" size="16" class="text-medium-emphasis" />
+              <VChip variant="outlined" size="small">{{ detail?.next_level || '已最高' }}</VChip>
+              <VChip v-if="detail" :color="detail.manual_blocked ? 'warning' : 'success'" variant="tonal"
+                     size="small">
+                {{ etaText(detail) }}
+              </VChip>
+              <VSpacer />
+              <VBtn icon="mdi-refresh" size="x-small" variant="text" title="刷新本站" :loading="busy"
+                    @click="refreshOne" />
+              <VBtn v-if="detail?.site_url" icon="mdi-open-in-new" size="x-small" variant="text"
+                    title="打开站点" :href="detail.site_url" target="_blank" />
+              <VTooltip v-if="detail" location="bottom end" max-width="420" open-delay="150">
+                <template #activator="{ props: tip }">
+                  <VBtn v-bind="tip" icon="mdi-information-outline" size="x-small" variant="text"
+                        title="数据来源与新鲜度" />
+                </template>
+                <div class="slb-meta">
+                  <div>
+                    <b>数据来源</b>{{ SOURCE_LABEL[detail.source] || detail.source || '-' }}
+                  </div>
+                  <div v-if="detail.source === 'ptd_snapshot'">
+                    <b>快照日期</b>{{ detail.snapshot_date || '-' }}
+                  </div>
+                  <div>
+                    <b>数据更新</b>{{ detail.l1_updated || '-' }}
+                  </div>
+                  <div v-if="liveExtraText">
+                    <b>站点侧</b>{{ liveExtraText }}
+                  </div>
+                </div>
+              </VTooltip>
+            </div>
+            <VCardText v-if="detail && detail.progress_pct !== null && detail.progress_pct !== undefined"
+                       class="pt-0 pb-3">
+              <div class="d-flex align-center ga-3">
+                <VProgressLinear :model-value="detail.progress_pct" height="6" rounded color="primary"
+                                 class="flex-grow-1" style="min-width: 120px" />
+                <span class="text-caption font-weight-medium flex-shrink-0">晋级 {{ detail.progress_pct }}%</span>
+                <span v-if="tightestText" class="text-caption text-medium-emphasis flex-shrink-0">
+                  {{ tightestText }}
                 </span>
-              </div>
-              <div v-if="liveExtraText" class="text-caption text-medium-emphasis">
-                🌐 站点侧实时:{{ liveExtraText }}
               </div>
             </VCardText>
             <VTabs v-model="activeTab" color="primary" density="comfortable" class="slb-tabs">
@@ -914,6 +937,25 @@ tr.bg-primary td {
 .slb-report :deep(textarea) {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
+}
+
+/* ⓘ tooltip:数据来源/更新于/站点侧实时 两列对齐,标签灰、值正常色。
+   ⚠️ 必须用 :deep() —— tooltip 内容被 Teleport 到 body,普通 scoped 选择器选不中 */
+:deep(.slb-meta) {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: 10px;
+  row-gap: 4px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+:deep(.slb-meta) div {
+  display: contents;
+}
+:deep(.slb-meta) b {
+  font-weight: 500;
+  opacity: 0.7;
+  white-space: nowrap;
 }
 
 /* 左侧站点列表:可拖动 + 插入位置提示 */
