@@ -89,6 +89,37 @@ async function req(method, path, body) {
   return unwrapResponse(await rawReq(method, path, body))
 }
 
+/**
+ * 用 /sites 返回的摘要拼一个「详情骨架」。
+ *
+ * 目的:首屏不要等 /detail(它可能现场抓站点页,实测 0.3~3s)。
+ * 状态条与三页签需要的等级信息,/sites 里其实已经有(level/next_level/eta_days/progress 等),
+ * 先用它渲染,等 /detail 回来再整体替换 —— 用户看到的是「立刻出内容」。
+ * 标 detail_pending,便于模板区分「真数据」与「骨架」(表格/图表这类细节等真数据再显示)。
+ */
+function detailFromTracked(site) {
+  if (!site || !site.evaluated) return null       // 没评估过就没有摘要可用,老实等详情
+  return {
+    detail_pending: true,
+    site_id: site.id,
+    site_name: site.name,
+    domain: site.domain,
+    level: site.level,
+    next_level: site.next_level,
+    eta_days: site.eta_days,
+    confidence: site.confidence,
+    manual_blocked: site.manual_blocked,
+    progress_pct: site.progress === null || site.progress === undefined
+      ? null : Math.round(site.progress * 100),
+    source: site.source,
+    l1_updated: site.updated,
+    reqs: [],
+    risks: [],
+    history: [],
+    ladder: [],
+  }
+}
+
 async function loadSites(keepSelection = true) {
   loading.value = true
   error.value = ''
@@ -101,8 +132,15 @@ async function loadSites(keepSelection = true) {
     if (!keepSelection || !exists) {
       selectedId.value = tracked.value.length ? tracked.value[0].id : 0
     }
-    if (selectedId.value) await loadDetail(selectedId.value)
-    else detail.value = null
+    if (selectedId.value) {
+      // ⚠️ 不 await:详情可能现场抓站点(实测 0.3~3s),等它会拖住整个列表的渲染。
+      // 列表先画出来,详情在后台补上(detailLoading 期间显示占位)。
+      const seedSite = tracked.value.find(s => s.id === selectedId.value)
+      if (seedSite) detail.value = detailFromTracked(seedSite)   // 先用 /sites 里的摘要顶上
+      loadDetail(selectedId.value)
+    } else {
+      detail.value = null
+    }
   } catch (e) {
     error.value = describeError(e)
   } finally {
@@ -114,18 +152,24 @@ async function loadDetail(siteId) {
   if (!siteId) return
   detailLoading.value = true
   try {
-    detail.value = await req('get', `/detail?site_id=${siteId}`)
+    const data = await req('get', `/detail?site_id=${siteId}`)
+    // 快速连点不同站点时,先发的请求可能后回来 —— 不是当前选中站就丢弃,避免显示错站数据
+    if (siteId !== selectedId.value) return
+    detail.value = data
   } catch (e) {
+    if (siteId !== selectedId.value) return
     detail.value = null
     error.value = describeError(e)
   } finally {
-    detailLoading.value = false
+    if (siteId === selectedId.value) detailLoading.value = false
   }
 }
 
 function selectSite(id) {
   if (selectedId.value === id) return
   selectedId.value = id
+  const seedSite = tracked.value.find(s => s.id === id)
+  if (seedSite) detail.value = detailFromTracked(seedSite)   // 切站也先顶上摘要,别白屏
   loadDetail(id)
 }
 
@@ -602,7 +646,13 @@ onMounted(() => loadSites(true))
             </VTabs>
           </VCard>
 
-          <VProgressLinear v-if="detailLoading" indeterminate color="primary" class="mb-3" />
+          <!-- 骨架阶段:状态条已用 /sites 摘要渲染,这里补一句说明为什么下半部分是空的 -->
+          <div v-if="detailLoading" class="d-flex align-center ga-2 mb-3">
+            <VProgressLinear indeterminate color="primary" class="flex-grow-1" style="max-width: 160px" />
+            <span class="text-caption text-medium-emphasis">
+              正在读取详情{{ detail?.detail_pending ? '(上方为上次刷新的摘要)' : '' }}…
+            </span>
+          </div>
 
           <template v-if="activeTab === 'overview'">
           <!-- 最紧条件:把「到底卡在哪一项」写在最前面 -->

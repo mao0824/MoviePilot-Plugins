@@ -332,6 +332,23 @@ class SiteLevelBoard(_PluginBase):
 
     _lock = threading.Lock()
 
+    # ---- 「站点页实时值」的内存 TTL 缓存 -----------------------------------
+    # 为什么需要:__live_values 会真的去抓馒头 API / PTS / PT时间 的站点页(走公网,
+    # 实测 0.35~1.05s/站)。而它被每个 /detail 请求、每次后台刷新反复调用 ——
+    # 看板的判定粒度是「日」,同一份实时值在几分钟内重复抓没有意义,只把首屏拖慢。
+    # 命中此缓存时首屏从 ~1.5s 降到毫秒级;失败(空结果)只缓存 60s,避免坏网络反复重试。
+    _live_cache: Dict[int, Any] = {}
+    _live_lock = threading.Lock()
+    _live_ttl = 300
+
+    # ---- 「整站评估结果」的内存 TTL 缓存 -----------------------------------
+    # 上面那个缓存解决的是「重抓站点页」的开销;这里解决的是「整站评估」本身的开销
+    # (读 user.db 历史 + 合并 state + 落盘 live_history),实测 0.3~2.9s。
+    # 前端每次点站点都会请求 /detail,没这个缓存就得重算一遍,翻站点时明显发顿。
+    _detail_cache: Dict[int, Any] = {}
+    _detail_lock = threading.Lock()
+    _detail_ttl = 180
+
     # =====================================================================
     # 初始化
     # =====================================================================
@@ -571,11 +588,12 @@ class SiteLevelBoard(_PluginBase):
         site_id = int(getattr(payload, "site_id", 0) or 0)
         if site_id:
             # 单站同步刷新:前端等结果(通常 1~3 秒) → 直接返回该站详情
+            # force_live=True:用户主动点「刷新本站」,要的就是重抓站点页,不吃 TTL 缓存
             try:
                 site = self.__site_by_id(site_id)
                 if not site:
                     return schemas.Response(success=False, message="站点不存在")
-                res = self.__evaluate(site)
+                res = self.__evaluate(site, force_live=True)
                 self.__merge_state([res])
                 return schemas.Response(success=True, message="已刷新", data=self.__detail_payload(res))
             except Exception as e:
@@ -583,7 +601,7 @@ class SiteLevelBoard(_PluginBase):
                 return schemas.Response(success=False, message=f"刷新失败:{e}")
         if self._lock.locked():
             return schemas.Response(success=False, message="上一轮刷新仍在进行中")
-        self.__bg(self.run_daily, manual=True)
+        self.__bg(self.run_daily, manual=True, force_live=True)
         return schemas.Response(success=True, message="已开始全量刷新,约 10~60 秒后返回本页刷新列表")
 
     # ---------------------------------------------------------------------
@@ -631,22 +649,41 @@ class SiteLevelBoard(_PluginBase):
             "tracked": tracked, "candidates": candidates,
             "last_refresh": state.get("time"), "snapshot_date": SNAPSHOT_DATE})
 
-    def api_detail(self, site_id: int = 0):
-        """单站详情:优先用缓存;没有缓存则现场评估一次(顺便回填缓存)。"""
+    def api_detail(self, site_id: int = 0, live: int = 0):
+        """单站详情:内存缓存 → level_state 缓存 → 现场评估(顺带回填缓存)。
+
+        三级命中,为的是让「翻看各站点」这件事稳定地快:
+        - 第 1 级 _detail_cache:整站评估结果的 TTL 缓存(180s),避免重复读库+落盘;
+        - 第 2 级 level_state:上次全量刷新的落盘结果,直接转 payload;
+        - 第 3 级 现场评估:只在上面都没有时发生(首次打开某站、或刚点过刷新)。
+        live=1 时三级全跳过,强制重抓站点页(给「刷新本站」用)。
+        """
         sid = int(site_id or 0)
         if not sid:
             return schemas.Response(success=False, message="缺少 site_id")
-        state = self.get_data("level_state") or {}
-        for x in (state.get("sites") or []):
-            if int(x.get("site_id") or 0) == sid:
-                return schemas.Response(success=True, data=self.__detail_payload(x))
+        if not live:
+            now = time.time()
+            with self._detail_lock:
+                hit = self._detail_cache.get(sid)
+            if hit and now - hit[0] < self._detail_ttl:
+                return schemas.Response(success=True, data=hit[1])
+            state = self.get_data("level_state") or {}
+            for x in (state.get("sites") or []):
+                if int(x.get("site_id") or 0) == sid:
+                    payload = self.__detail_payload(x)
+                    with self._detail_lock:
+                        self._detail_cache[sid] = (now, payload)
+                    return schemas.Response(success=True, data=payload)
         try:
             site = self.__site_by_id(sid)
             if not site:
                 return schemas.Response(success=False, message="站点不存在")
-            res = self.__evaluate(site)
+            res = self.__evaluate(site, force_live=bool(live))
             self.__merge_state([res])
-            return schemas.Response(success=True, data=self.__detail_payload(res))
+            payload = self.__detail_payload(res)
+            with self._detail_lock:
+                self._detail_cache[sid] = (time.time(), payload)
+            return schemas.Response(success=True, data=payload)
         except Exception as e:
             logger.error(f"【站点等级看板】评估站点 {sid} 失败:{e}")
             return schemas.Response(success=False, message=f"评估失败:{e}")
@@ -742,17 +779,17 @@ class SiteLevelBoard(_PluginBase):
     # =====================================================================
     # 主流程
     # =====================================================================
-    def run_daily(self, manual: bool = False) -> str:
+    def run_daily(self, manual: bool = False, force_live: bool = False) -> str:
         if not self._lock.acquire(blocking=False):
             return "上一轮仍在进行中"
         try:
-            logger.info("【站点等级看板】开始刷新")
+            logger.info("【站点等级看板】开始刷新%s" % ("(强制重抓站点页)" if force_live else ""))
             tracked = set(self.__tracked_ids())
             sites = [s for s in self.__sites_all() if int(s["id"]) in tracked]
             out = []
             for s in sites:
                 try:
-                    out.append(self.__evaluate(s))
+                    out.append(self.__evaluate(s, force_live=force_live))
                 except Exception as e:
                     logger.error(f"【站点等级看板】站点 {s.get('name')} 评估失败:{e}")
                     out.append({"site_id": s["id"], "site_name": s.get("name"), "domain": s.get("domain"),
@@ -766,7 +803,7 @@ class SiteLevelBoard(_PluginBase):
             self._lock.release()
 
     # ---- 单站评估 ---------------------------------------------------------
-    def __evaluate(self, site: Dict[str, Any]) -> Dict[str, Any]:
+    def __evaluate(self, site: Dict[str, Any], force_live: bool = False) -> Dict[str, Any]:
         domain, sid = site.get("domain"), int(site.get("id"))
         hist = self.__history(domain, 14)
         cur = hist[-1] if hist else {}
@@ -774,7 +811,8 @@ class SiteLevelBoard(_PluginBase):
 
         # 站点页 / 官方 API 的实时值优先:馒头与 PT时间 的**当前等级**以它们为准
         # (siteuserdata 只是 mp 的每日快照,可能落后)
-        live = self.__live_values(site, spec) or {}
+        # force_live=True 时绕过 TTL 缓存(用户点「刷新本站」「刷新全部」时确实重抓)
+        live = self.__live_values(site, spec, force=force_live) or {}
         if live:
             self.__record_live(sid, live)          # 站点页取到的值也落盘 → 供斜率用
         live_hist = self.__live_hist(sid)
@@ -1355,13 +1393,36 @@ class SiteLevelBoard(_PluginBase):
             return []
 
     # ---- 站点页 / 官方 API 取当前值 ---------------------------------------
-    def __live_values(self, site: Dict[str, Any], spec: Dict[str, Any]) -> Dict[str, Any]:
-        """取「权威当前值」:PTS 顶栏、馒头官方 API、PT时间 等级校验页。
+    def __live_values(self, site: Dict[str, Any], spec: Dict[str, Any], force: bool = False) -> Dict[str, Any]:
+        """取「权威当前值」:PTS 顶栏、馒头官方 API、PT时间 等级校验页 —— 带内存 TTL 缓存。
 
+        为什么缓存:这几步是**真的去抓公网站点页**(实测 0.35~1.05s/站),而 /detail
+        与后台刷新会反复走到这里。看板判定粒度是「日」,几分钟内重复抓同一份实时值
+        没有意义,只会把首屏拖慢(首屏 3 个站点实测合计 1.48s → 命中缓存后为毫秒级)。
+
+        force=True 时绕过缓存(手动刷新/全量刷新用,保证「我要最新」时确实重抓)。
         取不到就返回 {},调用方一律回落到 mp 的 siteuserdata(站点改版也不会把看板搞崩)。
         """
         if not self._use_site_page:
             return {}
+        sid = int(site.get("id") or 0)
+        now = time.time()
+        if not force and sid:
+            with self._live_lock:
+                hit = self._live_cache.get(sid)
+            if hit:
+                ts, ttl, val = hit
+                if now - ts < ttl:
+                    return dict(val)
+        val = self.__fetch_live(site)
+        if sid:
+            ttl = self._live_ttl if val else 60      # 失败只短缓存,避免坏网络反复重试
+            with self._live_lock:
+                self._live_cache[sid] = (now, ttl, dict(val))
+        return val
+
+    def __fetch_live(self, site: Dict[str, Any]) -> Dict[str, Any]:
+        """真正去抓站点页/官方 API(不查缓存)。"""
         domain = str(site.get("domain") or "").lower()
         try:
             if int(site.get("id") or 0) == 4 or "ptskit" in domain:
