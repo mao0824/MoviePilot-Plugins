@@ -796,6 +796,8 @@ class SiteLevelBoard(_PluginBase):
                                 "level": None, "error": str(e), "reqs": [], "risks": [], "source": "error"})
             state = {"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "sites": out}
             self.save_data("level_state", state)
+            with self._detail_lock:
+                self._detail_cache.clear()      # 全量刷新后详情要从新 state 重取,否则 180s 内看到旧详情
             self.__notify_changes(out, manual)
             logger.info("【站点等级看板】刷新完成:%d 个站点" % len(out))
             return "刷新完成(%d 个站点)" % len(out)
