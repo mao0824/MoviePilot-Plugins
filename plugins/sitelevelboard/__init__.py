@@ -599,6 +599,7 @@ class SiteLevelBoard(_PluginBase):
         state = self.get_data("level_state") or {}
         cache = {int(x["site_id"]): x for x in (state.get("sites") or []) if x.get("site_id")}
         by_id = {int(site["id"]): site for site in self.__sites_all()}
+        usernames = self.__usernames()
         tracked, candidates = [], []
         wanted = []
         for sid in tracked_ids:
@@ -611,6 +612,7 @@ class SiteLevelBoard(_PluginBase):
             c = cache.get(sid) or {}
             tracked.append({
                 "id": sid, "name": site.get("name"), "domain": site.get("domain"),
+                "username": usernames.get(site.get("domain") or ""),
                 "active": bool(site.get("is_active")),
                 "level": c.get("level"), "next_level": c.get("next_level"),
                 "eta_days": c.get("eta_days"), "confidence": c.get("confidence"),
@@ -1297,6 +1299,24 @@ class SiteLevelBoard(_PluginBase):
         except Exception as e:
             logger.error(f"【站点等级看板】读取站点列表失败:{e}")
             return []
+
+    def __usernames(self) -> Dict[str, str]:
+        """各站点的**账号名**(mp 抓站点时记在 siteuserdata.username)。
+
+        每一行都是 mp 在某天抓到的快照,故按 domain 取 id 最大(最新)的那行。
+        取不到不报错 —— 只影响前端显示一个名字。
+        """
+        try:
+            con = self.__conn()
+            rows = con.execute(
+                "select s.domain, s.username from siteuserdata s "
+                "where s.username is not null and s.username != '' "
+                "and s.id = (select max(s2.id) from siteuserdata s2 where s2.domain = s.domain)").fetchall()
+            con.close()
+            return {r["domain"]: r["username"] for r in rows}
+        except Exception as e:
+            logger.warn(f"【站点等级看板】读取站点账号名失败:{e}")
+            return {}
 
     def __history(self, domain: str, limit: int = 14) -> List[Dict[str, Any]]:
         try:

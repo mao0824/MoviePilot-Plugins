@@ -360,12 +360,6 @@ const tightest = computed(() => {
   return scored.reduce((a, b) => (b.v < a.v ? b : a)).r
 })
 
-/** 全站风险汇总:数据来自 /sites(每站的 risk 由后端算好),点站点名可跳到该站。 */
-const riskSummary = computed(() => ({
-  danger: tracked.value.filter(s => s.risk === 'danger'),
-  warn: tracked.value.filter(s => s.risk === 'warn'),
-}))
-
 /** 站点侧实时信息(目前来自馒头官方 API):最后登录 / 封存 / 警告。 */
 const liveExtraText = computed(() => {
   const x = detail.value?.live_extras || {}
@@ -468,32 +462,12 @@ onMounted(() => loadSites(true))
     <VRow>
       <!-- ============ 左:站点列表 ============ -->
       <VCol cols="12" md="3">
-        <!-- 全站风险汇总:一眼看全站有没有要处理的,点名字跳过去 -->
-        <VCard v-if="tracked.length" variant="tonal" class="mb-3"
-               :color="riskSummary.danger.length ? 'error' : (riskSummary.warn.length ? 'warning' : 'success')">
-          <VCardText class="py-2 text-caption">
-            <template v-if="riskSummary.danger.length || riskSummary.warn.length">
-              <b>风险汇总</b>
-              <span v-if="riskSummary.danger.length" class="ml-1">⛔ {{ riskSummary.danger.length }}</span>
-              <span v-if="riskSummary.warn.length" class="ml-1">⚠️ {{ riskSummary.warn.length }}</span>
-              <div class="mt-1">
-                <VChip v-for="s in [...riskSummary.danger, ...riskSummary.warn]" :key="'risk' + s.id"
-                       size="x-small" variant="flat" class="mr-1 mb-1" @click="selectSite(s.id)">
-                  {{ s.name }}
-                </VChip>
-              </div>
-            </template>
-            <template v-else>
-              ✅ {{ tracked.length }} 个站点均无风险提示
-            </template>
-          </VCardText>
-        </VCard>
-
         <VCard variant="outlined">
-          <VCardTitle class="text-subtitle-2 d-flex align-center">
-            <VIcon icon="mdi-server-network" start size="18" color="primary" />站点({{ tracked.length }})
+          <VCardTitle class="text-subtitle-2 d-flex align-center ga-1 py-2">
+            <VIcon icon="mdi-server-network" size="18" color="primary" />站点({{ tracked.length }})
             <VSpacer />
-            <span v-if="tracked.length > 1" class="text-caption text-medium-emphasis font-weight-regular">
+            <span v-if="tracked.length > 1" class="text-caption text-medium-emphasis font-weight-regular"
+                  title="按住条目可拖动调整顺序">
               <VIcon icon="mdi-drag-vertical" size="14" />拖动排序
             </span>
           </VCardTitle>
@@ -517,16 +491,15 @@ onMounted(() => loadSites(true))
               @drop.prevent.stop="onDrop(i)"
               @dragend="onDragEnd"
             >
-              <template #prepend>
-                <VIcon icon="mdi-circle" size="10" :color="riskColor(s.risk)" />
-              </template>
-              <VListItemTitle class="text-body-2">
-                {{ s.name }}
-                <VChip size="x-small" variant="tonal" class="ml-1">{{ s.level || '?' }}</VChip>
+              <VListItemTitle class="text-body-2 d-flex align-center ga-1">
+                <span class="slb-name">{{ s.name }}</span>
+                <VChip size="x-small" variant="tonal" class="flex-shrink-0">{{ s.level || '?' }}</VChip>
               </VListItemTitle>
-              <VListItemSubtitle class="text-caption">
-                {{ s.domain }}
-                <span v-if="!s.evaluated" class="text-warning"> · 未评估</span>
+              <VListItemSubtitle class="text-caption slb-sub">
+                <span class="slb-domain">{{ s.domain || '-' }}</span>
+                <span v-if="s.username" class="slb-account">
+                  <VIcon icon="mdi-account-outline" size="11" />{{ s.username }}
+                </span>
               </VListItemSubtitle>
               <template #append>
                 <VBtn
@@ -535,6 +508,7 @@ onMounted(() => loadSites(true))
                   variant="text"
                   color="error"
                   title="移出看板"
+                  class="slb-del"
                   @click.stop="confirmTarget = s"
                 />
               </template>
@@ -544,17 +518,9 @@ onMounted(() => loadSites(true))
             还没有站点。点下方「新增站点」从你的 mp 站点里挑。
           </div>
           <VDivider />
-          <div class="pa-3">
-            <VBtn block variant="tonal" prepend-icon="mdi-plus" @click="openAdd">新增站点</VBtn>
+          <div class="pa-2">
+            <VBtn block variant="tonal" size="small" prepend-icon="mdi-plus" @click="openAdd">新增站点</VBtn>
           </div>
-        </VCard>
-
-        <VCard variant="outlined" class="mt-3">
-          <VCardText class="text-caption text-medium-emphasis">
-            圆点含义:<VIcon icon="mdi-circle" size="10" color="success" /> 正常 ·
-            <VIcon icon="mdi-circle" size="10" color="warning" /> 有提示 ·
-            <VIcon icon="mdi-circle" size="10" color="error" /> 有硬风险
-          </VCardText>
         </VCard>
       </VCol>
 
@@ -962,5 +928,38 @@ tr.bg-primary td {
 }
 .slb-item.slb-drop-below {
   box-shadow: inset 0 -2px 0 0 rgb(var(--v-theme-primary));
+}
+/* 站点名过长时省略,别把等级 chip 挤掉 */
+.slb-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 副标题:域名 + 账号名,一行放不下时省略;账号名靠右灰显,不与域名抢视线 */
+.slb-sub {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.slb-domain {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.slb-account {
+  margin-left: auto;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  opacity: 0.75;
+}
+/* 删除按钮:默认淡一点,鼠标移到该条目才显眼(减少视觉噪音) */
+.slb-del {
+  opacity: 0.35;
+  transition: opacity 0.15s;
+}
+.slb-item:hover .slb-del {
+  opacity: 1;
 }
 </style>
