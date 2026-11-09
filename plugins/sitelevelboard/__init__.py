@@ -58,6 +58,13 @@ DB_PATH = "/config/user.db"          # mp 自身库(插件就跑在 mp 容器里
 SNAPSHOT_DATE = "2026-10-11"          # 内置等级规则快照的日期(UI 上必须显示)
 GB = 1024 ** 3                        # 站点阈值按 GiB 口径对齐 NexusPHP
 
+# live_history 的解析口径版本。解析器修了字段/单位/千分位后必须 +1,
+# 否则历史里老口径写进去的样本会继续污染斜率(取中位数也救不回来:样本里
+# 28 条坏值 vs 1 条好值,中位数必然落在坏值上)。
+#   1 → 初始版本:做种积分遇逗号截断(59674 读成 59)、缺 upload/download/seeding
+#   2 → 2026-11-10:千分位 + 补 upload/download/seeding/leeching
+LIVE_SCHEMA_VERSION = 2
+
 # 馒头 API 的 role → 等级名(与 mp 的 MTeam_sysRoleList 一致,取前 10 档)
 MROLE_NAMES = {
     "1": "User", "2": "Power User", "3": "Elite User", "4": "Crazy User",
@@ -1371,13 +1378,25 @@ class SiteLevelBoard(_PluginBase):
             return []
 
     def __record_live(self, sid: int, live: Dict[str, Any]):
-        """把站点页取到的当前值落盘成历史(供斜率/ETA 用 —— siteuserdata 没有这些字段)。"""
+        """把站点页取到的当前值落盘成历史(供斜率/ETA 用 —— siteuserdata 没有这些字段)。
+
+        ⚠️ 口径版本:每条样本都带 ``v``。读到 ``v`` 与当前 ``LIVE_SCHEMA_VERSION`` 不一致的
+        站点时**整段丢弃**——老解析器写进去的坏值(做种积分被逗号截断成 59、缺
+        upload/download)混在新样本里会把中位数斜率彻底带偏,留着比不留更糟。
+        """
         try:
             all_live = self.get_data("live_history") or {}
             arr = list(all_live.get(str(sid)) or [])
+            # 口径升级:老版本样本整段作废
+            if arr and any(e.get("v") != LIVE_SCHEMA_VERSION for e in arr):
+                dropped = len([e for e in arr if e.get("v") != LIVE_SCHEMA_VERSION])
+                logger.info(f"【站点等级看板】站点 {sid} 的 live_history 口径升级"
+                            f"(v→{LIVE_SCHEMA_VERSION}),丢弃 {dropped} 条旧样本重新积累")
+                arr = []
             now = datetime.now()
             row = {"updated_day": now.strftime("%Y-%m-%d"),
-                   "updated_time": now.strftime("%Y-%m-%d %H:%M:%S")}
+                   "updated_time": now.strftime("%Y-%m-%d %H:%M:%S"),
+                   "v": LIVE_SCHEMA_VERSION}
             row.update({k: v for k, v in live.items() if isinstance(v, (int, float))})
             if arr and arr[-1].get("updated_day") == row["updated_day"]:
                 arr[-1] = row            # 同一天只留最后一条,避免日内样本淹没日粒度
@@ -1389,10 +1408,12 @@ class SiteLevelBoard(_PluginBase):
             logger.warn(f"【站点等级看板】记录 live_history 失败:{e}")
 
     def __live_hist(self, sid: int) -> List[Dict[str, Any]]:
+        """读 live_history;口径不符的旧样本一律不参与斜率计算。"""
         try:
-            return list((self.get_data("live_history") or {}).get(str(sid)) or [])
+            arr = list((self.get_data("live_history") or {}).get(str(sid)) or [])
         except Exception:
             return []
+        return [e for e in arr if e.get("v") == LIVE_SCHEMA_VERSION]
 
     # ---- 站点页 / 官方 API 取当前值 ---------------------------------------
     def __live_values(self, site: Dict[str, Any], spec: Dict[str, Any], force: bool = False) -> Dict[str, Any]:
@@ -1441,21 +1462,54 @@ class SiteLevelBoard(_PluginBase):
     def __flatten(html: str) -> str:
         return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html or "").replace("&nbsp;", " "))
 
+    # ⚠️ 千分位:站点顶栏是 `做种积分 59,674`、`魔力值 [ 使用 ]: 139,569.1`,
+    #    老正则 `([\d.]+)` 遇到逗号只吃到 `59` → 做种积分被读成 59 分,
+    #    「下一级 ETA」算成还要 19971 天(2026-11-09 实测)。
+    #    → 统一用 NUM 允许千分位,取值时再去逗号。
+    _PTS_NUM = r"(\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?)"
+
     def __live_pts(self, site: Dict[str, Any]) -> Dict[str, Any]:
+        """PTS(ptskit)顶栏一行给全部关键值:
+        `分享率: 37.424 上传量: 1.828 TB 下载量: 50.02 GB 做种积分 59,674 当前活动: 394 0 ...`
+
+        ⚠️ 老实现只解析了 ratio / seeding_bonus / bonus 三个,`upload` / `download` /
+        `seeding` 全缺 → 走 `live.get(key, cur.get(key))` 回落到 siteuserdata 的陈旧值
+        (download 停在 0.78GB,实际已 50.02GB),于是「下载量>50GB」永远判不达成、
+        eta_kind=manual 直接把整站 ETA 打成未知。现在把这三个一并解析。
+        """
         text = self.__http_get(site, str(site.get("url") or "").rstrip("/") + "/index.php")
         if not text:
             return {}
         flat = self.__flatten(text)
         out: Dict[str, Any] = {}
-        m = re.search(r"做种积分\s*([\d.]+)", flat)
+        num = self._PTS_NUM
+
+        def grab(key: str, pat: str, scale: Optional[float] = None):
+            m = re.search(pat, flat)
+            if not m:
+                return
+            try:
+                v = float(m.group(1).replace(",", ""))
+            except (TypeError, ValueError):
+                return
+            out[key] = v * scale if scale else v
+
+        # 顶栏:`上传量: 1.828 TB` / `下载量: 50.02 GB`(带单位,乘成字节)
+        for key, label in (("upload", "上传量"), ("download", "下载量")):
+            m = re.search(label + r"[:：]\s*" + num + r"\s*([KMGT])(?:B)?\b", flat)
+            if m:
+                try:
+                    out[key] = float(m.group(1).replace(",", "")) * SIZE_UNITS.get(m.group(2).upper(), 1)
+                except (TypeError, ValueError):
+                    pass
+        grab("seeding_bonus", r"做种积分\s*" + num)
+        grab("ratio", r"分享率[:：]\s*" + num)
+        grab("bonus", r"魔力值\s*\[\s*使用\s*\]\s*[:：]\s*" + num)
+        # `当前活动: 394 0` = 做种数 / 下载数
+        m = re.search(r"当前活动[:：]\s*(\d+)\s+(\d+)", flat)
         if m:
-            out["seeding_bonus"] = float(m.group(1))
-        m = re.search(r"分享率[:：]\s*([\d.]+)", flat)
-        if m:
-            out["ratio"] = float(m.group(1))
-        m = re.search(r"魔力值\s*\[\s*使用\s*\]\s*[:：]\s*([\d.]+)", flat)
-        if m:
-            out["bonus"] = float(m.group(1))
+            out["seeding"] = float(m.group(1))
+            out["leeching"] = float(m.group(2))
         return out
 
     def __live_mteam(self, site: Dict[str, Any]) -> Dict[str, Any]:
