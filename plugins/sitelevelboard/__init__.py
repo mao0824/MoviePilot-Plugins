@@ -638,11 +638,20 @@ class SiteLevelBoard(_PluginBase):
             tight = self.__tightest_req(c.get("reqs")) if c else None
             risks = c.get("risks") or []
             worst = ([x for x in risks if x.get("level") == "danger"] or risks or [{}])[0]
+            # 老缓存(本次升级前写的)没有 has_ladder/is_top,用 level_order 兜底:
+            # 档位能匹配上 ⇒ 一定有阶梯;有阶梯且没有下一级 ⇒ 才是真的到顶。
+            has_ladder = c.get("has_ladder")
+            if has_ladder is None:
+                has_ladder = c.get("level_order") is not None
+            is_top = c.get("is_top")
+            if is_top is None:
+                is_top = bool(has_ladder and not c.get("next_level"))
             tracked.append({
                 "id": sid, "name": site.get("name"), "domain": site.get("domain"),
                 "username": usernames.get(site.get("domain") or ""),
                 "active": bool(site.get("is_active")),
                 "level": c.get("level"), "next_level": c.get("next_level"),
+                "has_ladder": bool(has_ladder), "is_top": bool(is_top),
                 "eta_days": c.get("eta_days"), "confidence": c.get("confidence"),
                 "manual_blocked": c.get("manual_blocked"), "progress": c.get("progress"),
                 # 卡点摘要:全站对比视图直接展示「卡在哪项、当前/目标」,不必进详情页
@@ -652,8 +661,11 @@ class SiteLevelBoard(_PluginBase):
                              "eta_kind": tight.get("eta_kind"),
                              "eta_days": tight.get("eta_days"),
                              "rate_label": tight.get("rate_label")} if tight else None),
+                # 没有阶梯的站风险无从判断,标 unknown 而不是 ok —— 一条规则都没读到,
+                # 说「正常」是没有依据的断言。
                 "risk": ("danger" if any(r.get("level") == "danger" for r in risks)
-                         else ("warn" if risks else "ok")),
+                         else "warn" if risks
+                         else "ok" if has_ladder else "unknown"),
                 "risk_text": worst.get("text"),
                 "source": c.get("source"), "updated": c.get("l1_updated"),
                 "evaluated": bool(c), "error": c.get("error"),
@@ -861,6 +873,11 @@ class SiteLevelBoard(_PluginBase):
             "level": level_name, "level_order": order_now,
             "next_level": (next_level or {}).get("name"),
             "next_order": (next_level or {}).get("order"),
+            # 「没有下一级」有两种完全不同的原因,前端必须分开说,不能都写成「已最高」:
+            #   has_ladder=False → 站点没公开阶梯,下一级**未知**(如 rousi.pro 只给经验值)
+            #   is_top=True      → 有阶梯且当前已是最高档,这才是事实上的「已最高」
+            "has_ladder": bool(ladder),
+            "is_top": bool(ladder) and order_now is not None and next_level is None,
             "eta_days": eta_days, "confidence": confidence,
             "manual_blocked": manual_blocked, "progress": progress,
             "reqs": reqs, "risks": risks,
@@ -1356,8 +1373,19 @@ class SiteLevelBoard(_PluginBase):
                 "seeding": h.get("seeding"),
                 "seeding_size_gb": round((h.get("seeding_size") or 0) / GB, 2),
             })
-        return {**r, "ladder": ladder, "history": hist,
-                "progress_pct": round((r.get("progress") or 0) * 100),
+        return {**r,
+                # 老缓存没有这两个字段(本次升级前评估的结果):按 spec 现算一遍,
+                # 免得「到顶了」在详情里退化成一概「未知」。
+                "has_ladder": (r.get("has_ladder") if r.get("has_ladder") is not None
+                               else bool(spec.get("ladder"))),
+                "is_top": (r.get("is_top") if r.get("is_top") is not None
+                           else bool(spec.get("ladder")) and r.get("level_order") is not None
+                                and not r.get("next_level")),
+                "ladder": ladder, "history": hist,
+                # progress 为 None = 不知道(Rousi 这类没阶梯的站),不能兜成 0 ——
+                # 0% 会被读成「一条都没达成」,是句假话。
+                "progress_pct": (None if r.get("progress") is None
+                                 else round(r.get("progress") * 100)),
                 "site_url": site.get("url"), "domain": site.get("domain")}
 
     # =====================================================================

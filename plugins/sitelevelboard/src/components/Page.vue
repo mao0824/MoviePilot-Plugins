@@ -131,6 +131,9 @@ function detailFromTracked(site) {
     domain: site.domain,
     level: site.level,
     next_level: site.next_level,
+    // 骨架也要带上:否则加载的 1 秒里,状态条会把「未知」闪成「已最高」
+    has_ladder: site.has_ladder !== false,
+    is_top: !!site.is_top,
     eta_days: site.eta_days,
     confidence: site.confidence,
     manual_blocked: site.manual_blocked,
@@ -609,8 +612,24 @@ function fmtTarget(key, v) {
 }
 
 function riskColor(risk) {
+  if (risk === 'unknown') return 'grey'
   return risk === 'danger' ? 'error' : risk === 'warn' ? 'warning' : 'success'
 }
+
+/**
+ * 「下一级」只有三种说法,不许混:
+ *   有下一级        → 直接写名字
+ *   is_top          → 已最高(有阶梯、且确实到顶了)
+ *   其余            → 未知(站点没公开阶梯,我们只是不知道)
+ * 2026-11-22 之前一律兜成「已最高」,把 rousi.pro(只有 Lv.3 + 经验值,
+ * 门槛在 staff 配置里、普通号读不到)说成已到顶 —— 这是假话。
+ */
+function nextText(s) {
+  if (!s) return '-'
+  if (s.next_level) return s.next_level
+  return s.is_top ? '已最高' : '未知'
+}
+
 
 /** 当前站点有没有风险 —— 显示成「等级概览」页签上的小圆点,人在别的页签也能看见。 */
 const riskLevel = computed(() => {
@@ -619,12 +638,19 @@ const riskLevel = computed(() => {
   return risks.length ? 'warn' : ''
 })
 
+/**
+ * 状态条上的 ETA 胶囊。原来 manual_blocked 一票否决 —— PTS 明明算出 ~12 天,
+ * 却只写「受人为条件限制」,等于把已知信息藏了。现在两者都写。
+ */
 function etaText(site) {
-  if (site.manual_blocked) return '受人为条件限制'
-  if (site.eta_days === null || site.eta_days === undefined) {
-    return site.next_level ? '无法估算' : '已最高/无规则'
+  const hasEta = site.eta_days !== null && site.eta_days !== undefined
+  if (hasEta) {
+    const base = `${fmtEta(site.eta_days)}(${CONFIDENCE_LABEL[site.confidence] || '?'})`
+    return site.manual_blocked ? `${base} + 需推动` : base
   }
-  return `${fmtEta(site.eta_days)}(${CONFIDENCE_LABEL[site.confidence] || '?'})`
+  if (site.manual_blocked) return '需人为推动'
+  if (site.is_top) return '已最高等级'
+  return site.has_ladder ? '无法估算' : '未知(站点未公开门槛)'
 }
 
 /**
@@ -655,11 +681,12 @@ function etaShort(s) {
     return `${base}(${CONFIDENCE_LABEL[s.confidence] || '?'})`
   }
   if (s.manual_blocked) return '需人为推动'
-  return s.next_level ? '无法估算' : '已最高'
+  if (s.is_top) return '已最高'
+  return s.has_ladder ? '无法估算' : '未知'
 }
 
-const RISK_LABEL = { danger: '危险', warn: '留意', ok: '正常' }
-const RISK_ORDER = { danger: 0, warn: 1, ok: 2 }
+const RISK_LABEL = { danger: '危险', warn: '留意', ok: '正常', unknown: '未知' }
+const RISK_ORDER = { danger: 0, warn: 1, ok: 2, unknown: 3 }
 
 /** 一句话卡点:与单站详情里那句「卡住晋级的是」同一个口径(后端已按最紧条件裁好)。 */
 function blockerText(b) {
@@ -787,7 +814,7 @@ onUnmounted(() => {
                 </td>
                 <td class="text-caption text-no-wrap">
                   <span class="font-weight-medium">{{ s.level || '?' }}</span>
-                  <span class="text-medium-emphasis"> → {{ s.next_level || '已最高' }}</span>
+                  <span class="text-medium-emphasis"> → {{ nextText(s) }}</span>
                 </td>
                 <td>
                   <div class="d-flex align-center ga-2">
@@ -804,7 +831,8 @@ onUnmounted(() => {
                   <span v-if="s.error" class="text-error">{{ s.error }}</span>
                   <span v-else-if="!s.evaluated" class="text-medium-emphasis">未评估(刷新一次即可)</span>
                   <span v-else-if="s.blockerText">{{ s.blockerText }}</span>
-                  <span v-else-if="!s.next_level" class="text-medium-emphasis">已最高等级</span>
+                  <span v-else-if="s.is_top" class="text-medium-emphasis">已最高等级</span>
+                  <span v-else-if="!s.has_ladder" class="text-medium-emphasis">站点未公开门槛</span>
                   <span v-else class="text-success">全部达成</span>
                 </td>
                 <td>
@@ -912,7 +940,7 @@ onUnmounted(() => {
               <span class="text-h6">{{ detail?.site_name || current?.name }}</span>
               <VChip color="primary" variant="tonal" size="small">{{ detail?.level || '?' }}</VChip>
               <VIcon icon="mdi-arrow-right" size="16" class="text-medium-emphasis" />
-              <VChip variant="outlined" size="small">{{ detail?.next_level || '已最高' }}</VChip>
+              <VChip variant="outlined" size="small">{{ nextText(detail) }}</VChip>
               <VChip v-if="detail" :color="detail.manual_blocked ? 'warning' : 'success'" variant="tonal"
                      size="small">
                 {{ etaText(detail) }}
@@ -1034,8 +1062,21 @@ onUnmounted(() => {
               </tbody>
             </VTable>
           </VCard>
-          <VAlert v-else-if="detail && !skeleton && !detail.reqs?.length" type="info" variant="tonal" density="compact" class="mb-3">
-            该站没有可解析的晋级条件(站点未公开门槛,可在插件配置里用「手动规则」补),以下仍显示当前等级与保号信息。
+          <!-- 没有 reqs 有三种原因,分开说清楚;合成一句会把「到顶了」说成「没规则」 -->
+          <VAlert v-else-if="detail && !skeleton && detail.is_top" type="success" variant="tonal"
+                  density="compact" class="mb-3">
+            已在该站最高等级 —— 没有更高的档位需要晋级,所以这里没有条件可列。
+          </VAlert>
+          <VAlert v-else-if="detail && !skeleton && !detail.has_ladder" type="info" variant="tonal"
+                  density="compact" class="mb-3">
+            该站没有公开等级门槛({{ detail.level || '当前等级' }} 是从 mp 每日快照读到的实际等级)。
+            拿不到门槛就不推算下一级、进度与 ETA —— 这类站常见于等级由经验值/站内成长决定的站点。
+            若你知道规则,可在插件配置里用「手动规则」补上。
+          </VAlert>
+          <VAlert v-else-if="detail && !skeleton" type="warning" variant="tonal"
+                  density="compact" class="mb-3">
+            当前等级「{{ detail.level || '?' }}」在已解析的阶梯里没有对上档位,条件无法评估 ——
+            多半是站点改了等级名。下面仍显示等级阶梯原文,可核对。
           </VAlert>
 
           <!-- 保号 / 封号 -->
