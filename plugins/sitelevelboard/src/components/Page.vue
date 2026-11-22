@@ -46,6 +46,20 @@ const detailLoading = ref(false)
  */
 const activeTab = ref('overview')
 
+/**
+ * 视图:detail=单站详情(默认) / compare=全站对比。
+ *
+ * 原来只有单站详情:想知道「4 个站里哪个快掉级、哪个卡住了」,得逐个点进左侧列表,
+ * 每点一次 0.3~3 秒,看完还得凭记忆横向比 —— 这是这个插件最不顺手的地方。
+ * 对比视图把 /sites 已经带回的摘要(等级/进度/ETA/卡点/风险)铺成一屏。
+ */
+const viewMode = ref('detail')
+const compareSort = ref('list')
+
+/** 站点详情客户端缓存:切回刚看过的站立刻出内容(后端 TTL 180s,这里 120s 更保守)。 */
+const detailCache = new Map()
+const DETAIL_CACHE_MS = 120000
+
 const addOpen = ref(false)
 const addSearch = ref('')
 const addSelected = ref([])
@@ -154,10 +168,19 @@ async function loadSites(keepSelection = true, withDetail = true) {
         detailLoading.value = false
         return
       }
+      /**
+       * 静默重取(「刷新全部」之后 12s / 40s 那两次)不许把已经画好的详情打回骨架:
+       * 原来这里无条件 ``detail.value = 骨架``,于是整张表先消失、再重新长出来,
+       * 页面明显闪一下(2026-11-22 真机确认)。只要还是同一个站,就保留旧数据,
+       * 让 /detail 的结果悄悄替换上去 —— 数据照样会更新,只是不再闪。
+       */
+      const sameSite = detail.value && !skeleton.value && detail.value.site_id === selectedId.value
+      if (!sameSite) {
+        const seedSite = tracked.value.find(s => s.id === selectedId.value)
+        if (seedSite) detail.value = detailFromTracked(seedSite)   // 先用 /sites 里的摘要顶上
+      }
       // ⚠️ 不 await:详情可能现场抓站点(实测 0.3~3s),等它会拖住整个列表的渲染。
       // 列表先画出来,详情在后台补上(detailLoading 期间显示占位)。
-      const seedSite = tracked.value.find(s => s.id === selectedId.value)
-      if (seedSite) detail.value = detailFromTracked(seedSite)   // 先用 /sites 里的摘要顶上
       loadDetail(selectedId.value)
     } else {
       detail.value = null
@@ -177,6 +200,7 @@ async function loadDetail(siteId) {
     // 快速连点不同站点时,先发的请求可能后回来 —— 不是当前选中站就丢弃,避免显示错站数据
     if (siteId !== selectedId.value) return
     detail.value = data
+    writeCache(siteId, data)
   } catch (e) {
     if (siteId !== selectedId.value) return
     detail.value = null
@@ -186,12 +210,50 @@ async function loadDetail(siteId) {
   }
 }
 
+/** 读客户端缓存:命中过期的当场丢掉,别把 5 分钟前的数字当现在。 */
+function readCache(siteId) {
+  const hit = detailCache.get(siteId)
+  if (!hit) return null
+  if (Date.now() - hit.ts > DETAIL_CACHE_MS) {
+    detailCache.delete(siteId)
+    return null
+  }
+  return hit.data
+}
+
+/** 骨架(detail_pending)不入缓存 —— 缓存里只留真数据,否则切回来又是空的。 */
+function writeCache(siteId, data) {
+  if (!siteId || !data || data.detail_pending) return
+  detailCache.set(siteId, { ts: Date.now(), data })
+}
+
+function clearCache() {
+  detailCache.clear()
+}
+
 function selectSite(id) {
   if (selectedId.value === id) return
   selectedId.value = id
+  const hit = readCache(id)
+  if (hit) {
+    // 同一会话里看过的站点:直接上真数据,0 请求 0 等待
+    detail.value = hit
+    detailLoading.value = false
+    return
+  }
   const seedSite = tracked.value.find(s => s.id === id)
   if (seedSite) detail.value = detailFromTracked(seedSite)   // 切站也先顶上摘要,别白屏
   loadDetail(id)
+}
+
+/** 对比表点某行:选中该站并切回单站视图。 */
+function openSite(id) {
+  viewMode.value = 'detail'
+  if (selectedId.value === id) {
+    if (!detail.value) loadDetail(id)
+    return
+  }
+  selectSite(id)
 }
 
 /**
@@ -215,6 +277,7 @@ async function refreshAll() {
   busy.value = true
   try {
     await req('post', '/refresh', {})
+    clearCache()   // 全量刷新后旧详情一律作废,免得切站看到刷新前的数字
     toast('已开始全量刷新,稍后自动更新列表', 'info')
     // 后台刷新约 10~60 秒;这里做一次延迟重取 + 允许手动再点
     later(() => loadSites(true), 12000)
@@ -233,6 +296,7 @@ async function refreshOne() {
   try {
     const data = await req('post', '/refresh', { site_id: site.id })
     detail.value = data
+    writeCache(site.id, data)
     await loadSites(true, false)   // 详情已在上面拿到,别再拉一遍
     toast('已刷新该站点', 'success')
   } catch (e) {
@@ -386,22 +450,47 @@ const trafficMetricDef = computed(
   () => TRAFFIC_METRICS.find(m => m.key === trafficMetric.value) || TRAFFIC_METRICS[0],
 )
 
-/** 内联 SVG 折线(不引第三方图表库;纵轴按当前指标自适应)。 */
+/**
+ * 内联 SVG 走势(不引第三方图表库;纵轴按当前指标自适应)。
+ *
+ * 2026-11-22 升级:原来只有一根 0.8px 的折线,看不出「最近是加速还是走平」,
+ * 也判断不出量级。现在补了面积填充(渐变)+ 三条水平参考线 + 悬浮十字准星,
+ * 并把上下留白从 0 改成 12% —— 之前曲线最高点永远贴着图表顶边,像被切掉。
+ */
 const trafficChart = computed(() => {
   const rows = trafficRows.value
   if (rows.length < 2) return null
   const vals = rows.map(h => Number(h[trafficMetric.value]) || 0)
-  const min = Math.min(...vals)
-  const max = Math.max(...vals)
-  const span = Math.max(max - min, 1)
+  const rawMin = Math.min(...vals)
+  const rawMax = Math.max(...vals)
+  const flat = rawMax === rawMin
+  // 全平的走势也要有高度:否则 span=0 → 除零后线跑到 NaN,图直接空白
+  const pad = flat
+    ? Math.max(Math.abs(rawMax) * 0.05, 0.5)
+    : (rawMax - rawMin) * 0.12
+  const min = rawMin - pad
+  const max = rawMax + pad
+  const span = max - min || 1
   const w = 100
   const h = 28
-  const points = vals.map((v, i) => {
-    const x = (i / (vals.length - 1)) * w
-    const y = h - ((v - min) / span) * h
-    return `${x.toFixed(2)},${y.toFixed(2)}`
-  })
-  return { min, max, w, h, points: points.join(' ') }
+  const pts = vals.map((v, i) => ({
+    x: (i / (vals.length - 1)) * w,
+    y: h - ((v - min) / span) * h,
+    v,
+  }))
+  const line = pts.map(p => `${p.x.toFixed(2)},${p.y.toFixed(2)}`).join(' ')
+  return {
+    min: rawMin, max: rawMax, w, h, pts, line,
+    area: `0,${h} ${line} ${w},${h}`,          // 折线 + 落到基线 → 填充区
+    grid: [0.25, 0.5, 0.75].map(r => Number((h * r).toFixed(2))),
+  }
+})
+
+/** 悬浮点(用 HTML 绝对定位画,不用 SVG 圆点 —— 非等比缩放下圆会被压成椭圆)。 */
+const hoverPoint = computed(() => {
+  const c = trafficChart.value
+  if (!c || trafficHover.value < 0) return null
+  return c.pts[trafficHover.value] || null
 })
 
 /** 鼠标在图上移动 → 定位到最近的采样日,读出当天数值。 */
@@ -412,6 +501,24 @@ function onChartMove(event) {
   const ratio = Math.min(Math.max((event.clientX - rect.left) / rect.width, 0), 1)
   trafficHover.value = Math.round(ratio * (rows.length - 1))
 }
+
+/** 悬浮读数:当天值 + 相对区间首日的累计变化(只看单点无法判断涨得快还是慢)。 */
+const hoverInfo = computed(() => {
+  const rows = trafficRows.value
+  const i = trafficHover.value
+  if (i < 0 || !rows.length) return null
+  const row = rows[i]
+  if (!row) return null
+  const def = trafficMetricDef.value
+  const key = trafficMetric.value
+  const delta = (Number(row[key]) || 0) - (Number(rows[0][key]) || 0)
+  return {
+    day: row.day,
+    label: def.label,
+    value: def.fmt(Number(row[key]) || 0),
+    delta: i === 0 ? '' : `较 ${rows[0].day} ${delta >= 0 ? '+' : ''}${def.fmt(delta)}`,
+  }
+})
 
 /** 区间变化一行:按当前指标与范围算首末差 + 日均。 */
 const trafficTrend = computed(() => {
@@ -533,6 +640,72 @@ const tightestText = computed(() => {
   return current === null ? label : label + ' ' + current + '/' + target
 })
 
+/* ---------------- 全站对比视图 ---------------- */
+
+/**
+ * 对比表的「预计」列:比单站状态条更省字,但**不许丢掉「还得自己动手」这件事**。
+ * 原来直接套 etaText,馒头式的人为条件会把整列写成「受人为条件限制」——
+ * 一列全是这句话就失去了比较意义(2026-11-22 真机看到的正是如此)。
+ */
+function etaShort(s) {
+  const hasEta = s.eta_days !== null && s.eta_days !== undefined
+  if (hasEta) {
+    const base = fmtEta(s.eta_days)
+    if (s.manual_blocked) return `${base} + 需推动`
+    return `${base}(${CONFIDENCE_LABEL[s.confidence] || '?'})`
+  }
+  if (s.manual_blocked) return '需人为推动'
+  return s.next_level ? '无法估算' : '已最高'
+}
+
+const RISK_LABEL = { danger: '危险', warn: '留意', ok: '正常' }
+const RISK_ORDER = { danger: 0, warn: 1, ok: 2 }
+
+/** 一句话卡点:与单站详情里那句「卡住晋级的是」同一个口径(后端已按最紧条件裁好)。 */
+function blockerText(b) {
+  if (!b || !b.label) return ''
+  const target = fmtTarget(b.key, b.target) + (b.unit || '')
+  const current = (b.current === null || b.current === undefined) ? null : fmtNum(b.current)
+  return current === null ? b.label : `${b.label} ${current}/${target}`
+}
+
+/**
+ * 对比行:直接用 /sites 的摘要(不额外请求)。
+ * 排序不是装饰 —— 站点一多,「按风险/按进度」能让人第一眼看到该先处理哪个。
+ */
+const compareRows = computed(() => {
+  const rows = tracked.value.map(s => {
+    const pct = (s.progress === null || s.progress === undefined)
+      ? null : Math.round(s.progress * 100)
+    return {
+      ...s,
+      pct,
+      bar: pct === null ? 0 : pct,     // 模板里不做 ?? 运算,进度条单独给个 0 兜底值
+      eta: etaShort(s),
+      blockerText: blockerText(s.blocker),
+      riskLabel: RISK_LABEL[s.risk] || RISK_LABEL.ok,
+    }
+  })
+  const byPct = (a, b) => (a.pct === null ? 101 : a.pct) - (b.pct === null ? 101 : b.pct)
+  if (compareSort.value === 'risk') {
+    return rows.slice().sort(
+      (a, b) => (RISK_ORDER[a.risk] ?? 9) - (RISK_ORDER[b.risk] ?? 9) || byPct(a, b),
+    )
+  }
+  if (compareSort.value === 'progress') return rows.slice().sort(byPct)
+  return rows
+})
+
+/** 顶部的「几个站需要留意」—— 对比表的结论先说出来,别让人自己在表里数。 */
+const riskCounts = computed(() => {
+  const c = { danger: 0, warn: 0 }
+  for (const s of tracked.value) {
+    if (s.risk === 'danger') c.danger += 1
+    else if (s.risk === 'warn') c.warn += 1
+  }
+  return c
+})
+
 onMounted(() => loadSites(true))
 
 onUnmounted(() => {
@@ -555,7 +728,11 @@ onUnmounted(() => {
           · 看板站点 {{ tracked.length }} 个
         </div>
       </VCol>
-      <VCol cols="auto">
+      <VCol cols="auto" class="d-flex align-center ga-2">
+        <VBtnToggle v-model="viewMode" density="compact" variant="outlined" divided mandatory>
+          <VBtn value="detail" size="small" prepend-icon="mdi-card-account-details-outline">单站详情</VBtn>
+          <VBtn value="compare" size="small" prepend-icon="mdi-view-list-outline">全站对比</VBtn>
+        </VBtnToggle>
         <VBtn size="small" variant="text" prepend-icon="mdi-file-document-outline"
               :loading="reportLoading" @click="loadReport">
           复制汇总
@@ -570,7 +747,90 @@ onUnmounted(() => {
       {{ error }}
     </VAlert>
 
-    <VRow>
+    <!-- ============ 全站对比:一屏看完全部站点的等级/进度/卡点/风险 ============ -->
+    <VRow v-if="viewMode === 'compare'">
+      <VCol cols="12">
+        <VCard variant="outlined">
+          <VCardTitle class="text-subtitle-2 d-flex align-center flex-wrap ga-2 py-2">
+            <VIcon icon="mdi-view-list-outline" size="18" color="primary" />
+            全站对比({{ compareRows.length }} 个)
+            <VChip v-if="riskCounts.danger" size="x-small" color="error" variant="flat">
+              {{ riskCounts.danger }} 个危险
+            </VChip>
+            <VChip v-if="riskCounts.warn" size="x-small" color="warning" variant="tonal">
+              {{ riskCounts.warn }} 个留意
+            </VChip>
+            <VSpacer />
+            <VBtnToggle v-model="compareSort" density="compact" variant="outlined" divided mandatory>
+              <VBtn value="list" size="small">列表顺序</VBtn>
+              <VBtn value="risk" size="small">按风险</VBtn>
+              <VBtn value="progress" size="small">按进度</VBtn>
+            </VBtnToggle>
+          </VCardTitle>
+          <VDivider />
+          <VTable v-if="compareRows.length" density="compact" class="slb-compare">
+            <thead>
+              <tr>
+                <th style="min-width:110px">站点</th>
+                <th style="width:130px">等级 → 下一级</th>
+                <th style="width:150px">晋级进度</th>
+                <th style="width:130px">预计</th>
+                <th>卡点(最紧的一项)</th>
+                <th style="width:82px">风险</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="s in compareRows" :key="s.id" class="slb-crow" @click="openSite(s.id)">
+                <td>
+                  <div class="slb-cname text-body-2">{{ s.name }}</div>
+                  <div class="text-caption text-medium-emphasis slb-cdomain">{{ s.domain || '-' }}</div>
+                </td>
+                <td class="text-caption text-no-wrap">
+                  <span class="font-weight-medium">{{ s.level || '?' }}</span>
+                  <span class="text-medium-emphasis"> → {{ s.next_level || '已最高' }}</span>
+                </td>
+                <td>
+                  <div class="d-flex align-center ga-2">
+                    <VProgressLinear :model-value="s.bar" height="6" rounded color="primary"
+                                     class="flex-grow-1" style="min-width:56px" />
+                    <span class="text-caption flex-shrink-0" style="min-width:34px;text-align:right">
+                      {{ s.pct === null ? '-' : s.pct + '%' }}
+                    </span>
+                  </div>
+                </td>
+                <td class="text-caption text-no-wrap"
+                    :class="s.manual_blocked ? 'text-warning' : ''">{{ s.eta }}</td>
+                <td class="text-caption">
+                  <span v-if="s.error" class="text-error">{{ s.error }}</span>
+                  <span v-else-if="!s.evaluated" class="text-medium-emphasis">未评估(刷新一次即可)</span>
+                  <span v-else-if="s.blockerText">{{ s.blockerText }}</span>
+                  <span v-else-if="!s.next_level" class="text-medium-emphasis">已最高等级</span>
+                  <span v-else class="text-success">全部达成</span>
+                </td>
+                <td>
+                  <VChip size="x-small" :color="riskColor(s.risk)" variant="tonal"
+                         :title="s.risk_text || ''">
+                    {{ s.riskLabel }}
+                  </VChip>
+                </td>
+              </tr>
+            </tbody>
+          </VTable>
+          <div v-else-if="loading" class="pa-4 d-flex align-center ga-2">
+            <VProgressLinear indeterminate color="primary" style="max-width:80px" />
+            <span class="text-caption text-medium-emphasis">正在读取站点列表…</span>
+          </div>
+          <div v-else class="pa-4 text-caption text-medium-emphasis">
+            看板里还没有站点。切回「单站」点左下角「新增站点」挑几个进来。
+          </div>
+          <div v-if="compareRows.length" class="pa-3 text-caption text-medium-emphasis slb-compare-tip">
+            点任一行进入该站详情。卡点 = 未达成条件里「当前/目标」最紧的那一项,与进度条同一口径。
+          </div>
+        </VCard>
+      </VCol>
+    </VRow>
+
+    <VRow v-else>
       <!-- ============ 左:站点列表 ============ -->
       <VCol cols="12" md="3">
         <VCard variant="outlined">
@@ -625,6 +885,10 @@ onUnmounted(() => {
               </template>
             </VListItem>
           </VList>
+          <div v-else-if="loading" class="pa-3 d-flex align-center ga-2">
+            <VProgressLinear indeterminate color="primary" style="max-width:64px" />
+            <span class="text-caption text-medium-emphasis">正在读取站点列表…</span>
+          </div>
           <div v-else class="pa-3 text-caption text-medium-emphasis">
             还没有站点。点下方「新增站点」从你的 mp 站点里挑。
           </div>
@@ -704,7 +968,7 @@ onUnmounted(() => {
           <div v-if="detailLoading" class="d-flex align-center ga-2 mb-3">
             <VProgressLinear indeterminate color="primary" class="flex-grow-1" style="max-width: 160px" />
             <span class="text-caption text-medium-emphasis">
-              正在读取详情{{ detail?.detail_pending ? '(上方为上次刷新的摘要)' : '' }}…
+              正在读取详情{{ detail?.detail_pending ? '(上方为上次刷新的摘要)' : '(上方为上次结果,马上更新)' }}…
             </span>
           </div>
 
@@ -896,15 +1160,32 @@ onUnmounted(() => {
               </div>
               <div v-if="trafficChart" class="slb-chart" @mousemove="onChartMove" @mouseleave="trafficHover = -1">
                 <svg :viewBox="`0 0 ${trafficChart.w} ${trafficChart.h}`" preserveAspectRatio="none">
-                  <polyline :points="trafficChart.points" fill="none"
-                            stroke="rgb(var(--v-theme-primary))" stroke-width="0.8"
+                  <defs>
+                    <linearGradient id="slbAreaGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stop-color="rgb(var(--v-theme-primary))" stop-opacity="0.38" />
+                      <stop offset="100%" stop-color="rgb(var(--v-theme-primary))" stop-opacity="0.02" />
+                    </linearGradient>
+                  </defs>
+                  <polygon :points="trafficChart.area" fill="url(#slbAreaGrad)" stroke="none" />
+                  <!-- 参考线画在填充层**之后**:先画会被面积色盖住,一条都看不见 -->
+                  <line v-for="(y, i) in trafficChart.grid" :key="'g' + i"
+                        x1="0" :y1="y" :x2="trafficChart.w" :y2="y"
+                        stroke="rgb(var(--v-theme-on-surface))" stroke-opacity="0.28"
+                        stroke-width="1" vector-effect="non-scaling-stroke" />
+                  <polyline :points="trafficChart.line" fill="none"
+                            stroke="rgb(var(--v-theme-primary))" stroke-width="1.8"
+                            stroke-linejoin="round" stroke-linecap="round"
                             vector-effect="non-scaling-stroke" />
                 </svg>
+                <!-- 准星与数据点用 HTML 画:SVG 里非等比缩放会把圆压成椭圆 -->
+                <div v-if="hoverPoint" class="slb-cross" :style="{ left: hoverPoint.x + '%' }" />
+                <div v-if="hoverPoint" class="slb-dot"
+                     :style="{ left: hoverPoint.x + '%', top: (hoverPoint.y / trafficChart.h * 100) + '%' }" />
               </div>
-              <div class="text-caption mt-1 mb-2">
-                <template v-if="trafficHover >= 0 && trafficRows[trafficHover]">
-                  {{ trafficRows[trafficHover].day }} · {{ trafficMetricDef.label }}
-                  <b>{{ trafficMetricDef.fmt(Number(trafficRows[trafficHover][trafficMetric]) || 0) }}</b>
+              <div class="text-caption mt-1 mb-2 d-flex flex-wrap align-center ga-3">
+                <template v-if="hoverInfo">
+                  <span><b>{{ hoverInfo.day }}</b> · {{ hoverInfo.label }} <b>{{ hoverInfo.value }}</b></span>
+                  <span v-if="hoverInfo.delta" class="text-medium-emphasis">{{ hoverInfo.delta }}</span>
                 </template>
                 <span v-else-if="trafficChart" class="text-medium-emphasis">
                   纵轴 {{ trafficMetricDef.fmt(trafficChart.min) }} ~ {{ trafficMetricDef.fmt(trafficChart.max) }}
@@ -1030,11 +1311,45 @@ tr.bg-primary td {
 /* 流量趋势曲线:撑满宽度、鼠标可读数值 */
 .slb-chart {
   cursor: crosshair;
+  position: relative;          /* 准星/数据点按百分比绝对定位,需要它做参照 */
 }
 .slb-chart svg {
   display: block;
   width: 100%;
-  height: 64px;
+  height: 80px;                 /* 原来 64px:14 天的折线挤在一起,涨跌看不出斜率差别 */
+}
+/* 悬浮准星:一条竖线 + 一个圆点,比「只能读下面那行字」更容易对上某天 */
+.slb-cross {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: rgba(var(--v-theme-primary), 0.45);
+  pointer-events: none;
+}
+.slb-dot {
+  position: absolute;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: rgb(var(--v-theme-primary));
+  box-shadow: 0 0 0 2px rgb(var(--v-theme-surface));
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+/* 全站对比表:整行可点 —— 悬停给底色,别让人猜「这里能不能点」 */
+.slb-compare tbody tr {
+  cursor: pointer;
+}
+.slb-compare tbody tr:hover td {
+  background: rgba(var(--v-theme-primary), 0.06);
+}
+.slb-cname,
+.slb-cdomain {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* 汇总文本:等宽字体,便于阅读对齐 */

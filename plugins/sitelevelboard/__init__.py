@@ -635,6 +635,9 @@ class SiteLevelBoard(_PluginBase):
             if not site:
                 continue
             c = cache.get(sid) or {}
+            tight = self.__tightest_req(c.get("reqs")) if c else None
+            risks = c.get("risks") or []
+            worst = ([x for x in risks if x.get("level") == "danger"] or risks or [{}])[0]
             tracked.append({
                 "id": sid, "name": site.get("name"), "domain": site.get("domain"),
                 "username": usernames.get(site.get("domain") or ""),
@@ -642,8 +645,16 @@ class SiteLevelBoard(_PluginBase):
                 "level": c.get("level"), "next_level": c.get("next_level"),
                 "eta_days": c.get("eta_days"), "confidence": c.get("confidence"),
                 "manual_blocked": c.get("manual_blocked"), "progress": c.get("progress"),
-                "risk": ("danger" if any(r.get("level") == "danger" for r in (c.get("risks") or []))
-                         else ("warn" if c.get("risks") else "ok")),
+                # 卡点摘要:全站对比视图直接展示「卡在哪项、当前/目标」,不必进详情页
+                "blocker": ({"key": tight.get("key"), "label": tight.get("label"),
+                             "current": tight.get("current"),
+                             "target": tight.get("target"), "unit": tight.get("unit") or "",
+                             "eta_kind": tight.get("eta_kind"),
+                             "eta_days": tight.get("eta_days"),
+                             "rate_label": tight.get("rate_label")} if tight else None),
+                "risk": ("danger" if any(r.get("level") == "danger" for r in risks)
+                         else ("warn" if risks else "ok")),
+                "risk_text": worst.get("text"),
                 "source": c.get("source"), "updated": c.get("l1_updated"),
                 "evaluated": bool(c), "error": c.get("error"),
             })
@@ -998,6 +1009,28 @@ class SiteLevelBoard(_PluginBase):
         if not etas:
             return None, "none"
         return max(etas), ("high" if len(hist) >= 14 else "mid")
+
+    @staticmethod
+    def __tightest_req(reqs: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """未达成条件里「当前/目标」最小的那个 —— 与 ``__progress`` 同一口径。
+
+        2026-11-22 新增:站点列表要支撑「全站对比」视图,得给每个站一句卡点摘要
+        (卡在哪一项、当前/目标多少)。原来这些信息只在 /detail 里,想比较 4 个站
+        就得进 4 次详情页,每次 0.3~3 秒。
+        ⚠️ 选法必须与 ``__progress`` 一致:同一个站,进度条百分比和卡点文案
+        指向的必须是同一项条件,否则用户会觉得数字自相矛盾。
+        """
+        unmet = [r for r in (reqs or []) if not r.get("met")]
+        if not unmet:
+            return None
+        scored = []
+        for r in unmet:
+            t, c = r.get("target"), r.get("current")
+            if t and isinstance(c, (int, float)):
+                scored.append((min(1.0, float(c) / float(t)), r))
+        if not scored:
+            return unmet[0]
+        return min(scored, key=lambda x: x[0])[1]
 
     @staticmethod
     def __progress(reqs: List[Dict[str, Any]]) -> Optional[float]:

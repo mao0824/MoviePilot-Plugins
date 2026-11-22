@@ -1,34 +1,68 @@
 
 /* 只做微调;主题色/间距一律沿用宿主 Vuetify 主题 */
-.bg-primary tr td[data-v-21d94f67],
-tr.bg-primary td[data-v-21d94f67] {
+.bg-primary tr td[data-v-b710def2],
+tr.bg-primary td[data-v-b710def2] {
   background: rgba(var(--v-theme-primary), 0.12);
 }
 
 /* 右侧页签:贴着状态条底部,与内容区用同一条分隔线 */
-.slb-tabs[data-v-21d94f67] {
+.slb-tabs[data-v-b710def2] {
   border-top: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
 }
 
 /* 流量趋势曲线:撑满宽度、鼠标可读数值 */
-.slb-chart[data-v-21d94f67] {
+.slb-chart[data-v-b710def2] {
   cursor: crosshair;
+  position: relative;          /* 准星/数据点按百分比绝对定位,需要它做参照 */
 }
-.slb-chart svg[data-v-21d94f67] {
+.slb-chart svg[data-v-b710def2] {
   display: block;
   width: 100%;
-  height: 64px;
+  height: 80px;                 /* 原来 64px:14 天的折线挤在一起,涨跌看不出斜率差别 */
+}
+/* 悬浮准星:一条竖线 + 一个圆点,比「只能读下面那行字」更容易对上某天 */
+.slb-cross[data-v-b710def2] {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: rgba(var(--v-theme-primary), 0.45);
+  pointer-events: none;
+}
+.slb-dot[data-v-b710def2] {
+  position: absolute;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: rgb(var(--v-theme-primary));
+  box-shadow: 0 0 0 2px rgb(var(--v-theme-surface));
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+/* 全站对比表:整行可点 —— 悬停给底色,别让人猜「这里能不能点」 */
+.slb-compare tbody tr[data-v-b710def2] {
+  cursor: pointer;
+}
+.slb-compare tbody tr:hover td[data-v-b710def2] {
+  background: rgba(var(--v-theme-primary), 0.06);
+}
+.slb-cname[data-v-b710def2],
+.slb-cdomain[data-v-b710def2] {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* 汇总文本:等宽字体,便于阅读对齐 */
-.slb-report[data-v-21d94f67] textarea {
+.slb-report[data-v-b710def2] textarea {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
 }
 
 /* ⓘ tooltip:数据来源/更新于/站点侧实时 两列对齐,标签灰、值正常色。
    ⚠️ 必须用 :deep() —— tooltip 内容被 Teleport 到 body,普通 scoped 选择器选不中 */
-[data-v-21d94f67] .slb-meta {
+[data-v-b710def2] .slb-meta {
   display: grid;
   grid-template-columns: auto 1fr;
   column-gap: 10px;
@@ -36,32 +70,32 @@ tr.bg-primary td[data-v-21d94f67] {
   font-size: 12px;
   line-height: 1.45;
 }
-[data-v-21d94f67] .slb-meta div {
+[data-v-b710def2] .slb-meta div {
   display: contents;
 }
-[data-v-21d94f67] .slb-meta b {
+[data-v-b710def2] .slb-meta b {
   font-weight: 500;
   opacity: 0.7;
   white-space: nowrap;
 }
 
 /* 左侧站点列表:可拖动 + 插入位置提示 */
-.slb-item[data-v-21d94f67] {
+.slb-item[data-v-b710def2] {
   cursor: grab;
 }
-.slb-item.slb-dragging[data-v-21d94f67] {
+.slb-item.slb-dragging[data-v-b710def2] {
   opacity: 0.4;
 }
-.slb-item.slb-drop-above[data-v-21d94f67] {
+.slb-item.slb-drop-above[data-v-b710def2] {
   box-shadow: inset 0 2px 0 0 rgb(var(--v-theme-primary));
 }
-.slb-item.slb-drop-below[data-v-21d94f67] {
+.slb-item.slb-drop-below[data-v-b710def2] {
   box-shadow: inset 0 -2px 0 0 rgb(var(--v-theme-primary));
 }
 /* 站点名过长时省略,别把等级 chip 挤掉。
    ⚠️ 必须 min-width:0 + flex:1:flex item 默认 min-width:auto 会拒绝收缩,
    名字一长就把 chip 顶到下一行(2026-11-22 「Rousi Pro / Lv.3」实测换行)。 */
-.slb-name[data-v-21d94f67] {
+.slb-name[data-v-b710def2] {
   min-width: 0;
   flex: 1;
   overflow: hidden;
@@ -69,17 +103,17 @@ tr.bg-primary td[data-v-21d94f67] {
   white-space: nowrap;
 }
 /* 副标题:域名 + 账号名,一行放不下时省略;账号名靠右灰显,不与域名抢视线 */
-.slb-sub[data-v-21d94f67] {
+.slb-sub[data-v-b710def2] {
   display: flex;
   align-items: center;
   gap: 8px;
 }
-.slb-domain[data-v-21d94f67] {
+.slb-domain[data-v-b710def2] {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.slb-account[data-v-21d94f67] {
+.slb-account[data-v-b710def2] {
   margin-left: auto;
   flex-shrink: 0;
   display: inline-flex;
@@ -88,10 +122,10 @@ tr.bg-primary td[data-v-21d94f67] {
   opacity: 0.75;
 }
 /* 删除按钮:默认淡一点,鼠标移到该条目才显眼(减少视觉噪音) */
-.slb-del[data-v-21d94f67] {
+.slb-del[data-v-b710def2] {
   opacity: 0.35;
   transition: opacity 0.15s;
 }
-.slb-item:hover .slb-del[data-v-21d94f67] {
+.slb-item:hover .slb-del[data-v-b710def2] {
   opacity: 1;
 }
