@@ -6,7 +6,7 @@
  * 独立开发时没有 ``api``,自动退化为 fetch(带 cookie)。
  * 数据全部来自插件后端 11 个端点,契约见插件 __init__.py 顶部说明。
  */
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import {
   CONFIDENCE_LABEL, SOURCE_LABEL, describeError, fmtEta, fmtGb, fmtNum, unwrapResponse,
 } from '../utils'
@@ -65,6 +65,17 @@ const filteredCandidates = computed(() => {
 
 const current = computed(() => tracked.value.find(item => item.id === selectedId.value) || null)
 
+/**
+ * 「当前展示的是骨架,不是真数据」。
+ *
+ * 首屏与切站都先用 /sites 摘要拼一个骨架顶上(见 detailFromTracked),但骨架的
+ * reqs / ladder / history 都是**空数组**。模板里那些「该站没有可解析的晋级条件」
+ * 「站点未提供保号条款」空态,判据正是「数组为空」—— 于是加载的 0.3~3 秒里,
+ * 用户看到的是一句句「这站没规则」的假消息(2026-11-22 真机确认)。
+ * 所以空态一律要再过一道 !skeleton:骨架阶段宁可什么都不说,等真数据回来再说。
+ */
+const skeleton = computed(() => !detail.value || detail.value.detail_pending === true)
+
 function toast(text, color = 'success') {
   snack.value = { show: true, text, color }
 }
@@ -120,7 +131,13 @@ function detailFromTracked(site) {
   }
 }
 
-async function loadSites(keepSelection = true) {
+/**
+ * @param keepSelection 是否保留当前选中站点(新增/删除站点后要保留,首次进入不保留)
+ * @param withDetail    是否顺带拉详情。⚠️ 单站刷新后调用时传 false —— 那个接口
+ *                      已经把刷新后的详情直接返回了,再拉一次 /detail 等于白跑一轮
+ *                      (每次 0.3~3s),这是 2026-11-22 顺手修掉的重复请求。
+ */
+async function loadSites(keepSelection = true, withDetail = true) {
   loading.value = true
   error.value = ''
   try {
@@ -133,6 +150,10 @@ async function loadSites(keepSelection = true) {
       selectedId.value = tracked.value.length ? tracked.value[0].id : 0
     }
     if (selectedId.value) {
+      if (!withDetail) {
+        detailLoading.value = false
+        return
+      }
       // ⚠️ 不 await:详情可能现场抓站点(实测 0.3~3s),等它会拖住整个列表的渲染。
       // 列表先画出来,详情在后台补上(detailLoading 期间显示占位)。
       const seedSite = tracked.value.find(s => s.id === selectedId.value)
@@ -173,14 +194,31 @@ function selectSite(id) {
   loadDetail(id)
 }
 
+/**
+ * 全量刷新是后台跑的,前端只能「过一会儿再看一眼」。这些 setTimeout **必须登记**:
+ * 插件页是可切走的,组件卸载后定时器仍在跑,回调里 loadSites 会对着已卸载的组件
+ * 改状态 + 白发两个请求(2026-11-22 发现原来两条 setTimeout 完全没登记,也没清理)。
+ */
+const pendingTimers = []
+
+function later(fn, ms) {
+  const id = setTimeout(() => {
+    const i = pendingTimers.indexOf(id)
+    if (i >= 0) pendingTimers.splice(i, 1)
+    fn()
+  }, ms)
+  pendingTimers.push(id)
+  return id
+}
+
 async function refreshAll() {
   busy.value = true
   try {
     await req('post', '/refresh', {})
     toast('已开始全量刷新,稍后自动更新列表', 'info')
     // 后台刷新约 10~60 秒;这里做一次延迟重取 + 允许手动再点
-    setTimeout(() => loadSites(true), 12000)
-    setTimeout(() => loadSites(true), 40000)
+    later(() => loadSites(true), 12000)
+    later(() => loadSites(true), 40000)
   } catch (e) {
     toast(describeError(e), 'error')
   } finally {
@@ -195,7 +233,7 @@ async function refreshOne() {
   try {
     const data = await req('post', '/refresh', { site_id: site.id })
     detail.value = data
-    await loadSites(true)
+    await loadSites(true, false)   // 详情已在上面拿到,别再拉一遍
     toast('已刷新该站点', 'success')
   } catch (e) {
     toast(describeError(e), 'error')
@@ -452,6 +490,17 @@ function roadmapBlocker(m) {
   }).join(' · ')
 }
 
+/**
+ * 目标值展示:分享率是比值,「目标 8 / 当前 7.19」两个数字看着像不同量纲,
+ * 统一给到 1~2 位小数(8 → 8.0,7.5 → 7.5);其余走 fmtNum 的千分位。
+ */
+function fmtTarget(key, v) {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return String(v ?? '-')
+  if (key === 'ratio' || key === 'true_ratio') return n.toFixed(2).replace(/0$/, '')
+  return fmtNum(n)
+}
+
 function riskColor(risk) {
   return risk === 'danger' ? 'error' : risk === 'warn' ? 'warning' : 'success'
 }
@@ -479,12 +528,17 @@ const tightestText = computed(() => {
   const r = tightest.value
   if (!r) return ''
   const label = r.label || '-'
-  const target = fmtNum(r.target) + (r.unit || '')
+  const target = fmtTarget(r.key, r.target) + (r.unit || '')
   const current = (r.current === null || r.current === undefined) ? null : fmtNum(r.current)
   return current === null ? label : label + ' ' + current + '/' + target
 })
 
 onMounted(() => loadSites(true))
+
+onUnmounted(() => {
+  // 组件卸载 = 用户已经离开看板,挂着的「过会儿再看一眼」全部作废
+  while (pendingTimers.length) clearTimeout(pendingTimers.pop())
+})
 </script>
 
 <template>
@@ -665,7 +719,7 @@ onMounted(() => loadSites(true))
               <div class="mb-1 font-weight-medium">{{ tightest.label }}</div>
               <div class="text-caption text-medium-emphasis">
                 当前 {{ tightest.current === null ? '取不到' : fmtNum(tightest.current) + tightest.unit }}
-                → 目标 {{ fmtNum(tightest.target) }}{{ tightest.unit }}
+                → 目标 {{ fmtTarget(tightest.key, tightest.target) }}{{ tightest.unit }}
                 <template v-if="typeof tightest.current === 'number' && tightest.target">
                   · 还差 {{ fmtNum(Math.max(0, tightest.target - tightest.current)) }}{{ tightest.unit }}
                 </template>
@@ -689,7 +743,7 @@ onMounted(() => loadSites(true))
             <VTable density="compact">
               <thead>
                 <tr>
-                  <th style="width:46px">状态</th>
+                  <th style="width:58px;white-space:nowrap">状态</th>
                   <th>条件</th>
                   <th style="width:120px">目标</th>
                   <th style="width:120px">当前</th>
@@ -703,7 +757,7 @@ onMounted(() => loadSites(true))
                            :color="r.met ? 'success' : 'error'" size="18" />
                   </td>
                   <td>{{ r.label }}</td>
-                  <td>{{ fmtNum(r.target) }}{{ r.unit }}</td>
+                  <td>{{ fmtTarget(r.key, r.target) }}{{ r.unit }}</td>
                   <td>{{ r.current === null ? '取不到' : fmtNum(r.current) + r.unit }}</td>
                   <td>
                     <span v-if="r.met">已达成</span>
@@ -716,7 +770,7 @@ onMounted(() => loadSites(true))
               </tbody>
             </VTable>
           </VCard>
-          <VAlert v-else-if="detail && !detail.reqs?.length" type="info" variant="tonal" density="compact" class="mb-3">
+          <VAlert v-else-if="detail && !skeleton && !detail.reqs?.length" type="info" variant="tonal" density="compact" class="mb-3">
             该站没有可解析的晋级条件(站点未公开门槛,可在插件配置里用「手动规则」补),以下仍显示当前等级与保号信息。
           </VAlert>
 
@@ -742,12 +796,12 @@ onMounted(() => loadSites(true))
                         卡点:{{ roadmapBlocker(row.data) }}
                       </div>
                     </div>
-                    <div v-if="!roadmapRows.length" class="text-medium-emphasis mb-2">
+                    <div v-if="!skeleton && !roadmapRows.length" class="text-medium-emphasis mb-2">
                       该站规则里没有保号档信息(仍可看下面的条款原文)
                     </div>
                     <VDivider class="my-2" />
                     <div v-for="(t, i) in detail.keep_rules || []" :key="'k' + i">✅ {{ t }}</div>
-                    <div v-if="!(detail.keep_rules || []).length" class="text-medium-emphasis">站点未提供保号条款</div>
+                    <div v-if="!skeleton && !(detail.keep_rules || []).length" class="text-medium-emphasis">站点未提供保号条款</div>
                   </div>
                 </VCardText>
               </VCard>
@@ -760,7 +814,7 @@ onMounted(() => loadSites(true))
                 <VDivider />
                 <VCardText class="text-body-2">
                   <div v-for="(t, i) in detail?.ban_rules || []" :key="'b' + i" class="mb-1">⛔ {{ t }}</div>
-                  <div v-if="!detail?.ban_rules?.length" class="text-medium-emphasis">
+                  <div v-if="!skeleton && !detail?.ban_rules?.length" class="text-medium-emphasis">
                     站点未提供(或不在公开页面)——请以站点公告为准
                   </div>
                   <template v-if="detail?.risks?.length">
@@ -813,7 +867,7 @@ onMounted(() => loadSites(true))
               </tbody>
             </VTable>
           </VCard>
-          <VAlert v-else type="info" variant="tonal" density="compact">
+          <VAlert v-else-if="!skeleton" type="info" variant="tonal" density="compact">
             该站没有可解析的等级阶梯 —— 站点未公开等级规则,可在插件配置里用「手动规则」补。
           </VAlert>
           </template>
@@ -878,7 +932,7 @@ onMounted(() => loadSites(true))
               </VTable>
             </VCardText>
           </VCard>
-          <VAlert v-else type="info" variant="tonal" density="compact">
+          <VAlert v-else-if="!skeleton" type="info" variant="tonal" density="compact">
             还没有历史快照 —— mp 的 siteuserdata 每天更新一行,攒几天后这里会出现曲线。
           </VAlert>
           </template>
@@ -1021,8 +1075,12 @@ tr.bg-primary td {
 .slb-item.slb-drop-below {
   box-shadow: inset 0 -2px 0 0 rgb(var(--v-theme-primary));
 }
-/* 站点名过长时省略,别把等级 chip 挤掉 */
+/* 站点名过长时省略,别把等级 chip 挤掉。
+   ⚠️ 必须 min-width:0 + flex:1:flex item 默认 min-width:auto 会拒绝收缩,
+   名字一长就把 chip 顶到下一行(2026-11-22 「Rousi Pro / Lv.3」实测换行)。 */
 .slb-name {
+  min-width: 0;
+  flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

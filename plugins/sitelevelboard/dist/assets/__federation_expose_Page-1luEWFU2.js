@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import { f as fmtNum, S as SOURCE_LABEL, a as fmtEta, b as fmtGb, d as describeError, C as CONFIDENCE_LABEL, u as unwrapResponse } from './utils-CImzM-zu.js';
+import { f as fmtNum, S as SOURCE_LABEL, a as fmtEta, b as fmtGb, d as describeError, C as CONFIDENCE_LABEL, u as unwrapResponse } from './utils-JdTrmUsi.js';
 
 const _export_sfc = (sfc, props) => {
   const target = sfc.__vccOpts || sfc;
@@ -100,7 +100,7 @@ const _hoisted_46 = {
 };
 const _hoisted_47 = { class: "text-caption text-medium-emphasis ml-2" };
 
-const {computed,onMounted,ref} = await importShared('vue');
+const {computed,onMounted,onUnmounted,ref} = await importShared('vue');
 
 const REL_BASE = 'plugin/SiteLevelBoard';
 
@@ -169,6 +169,17 @@ const filteredCandidates = computed(() => {
 
 const current = computed(() => tracked.value.find(item => item.id === selectedId.value) || null);
 
+/**
+ * 「当前展示的是骨架,不是真数据」。
+ *
+ * 首屏与切站都先用 /sites 摘要拼一个骨架顶上(见 detailFromTracked),但骨架的
+ * reqs / ladder / history 都是**空数组**。模板里那些「该站没有可解析的晋级条件」
+ * 「站点未提供保号条款」空态,判据正是「数组为空」—— 于是加载的 0.3~3 秒里,
+ * 用户看到的是一句句「这站没规则」的假消息(2026-11-22 真机确认)。
+ * 所以空态一律要再过一道 !skeleton:骨架阶段宁可什么都不说,等真数据回来再说。
+ */
+const skeleton = computed(() => !detail.value || detail.value.detail_pending === true);
+
 function toast(text, color = 'success') {
   snack.value = { show: true, text, color };
 }
@@ -224,7 +235,13 @@ function detailFromTracked(site) {
   }
 }
 
-async function loadSites(keepSelection = true) {
+/**
+ * @param keepSelection 是否保留当前选中站点(新增/删除站点后要保留,首次进入不保留)
+ * @param withDetail    是否顺带拉详情。⚠️ 单站刷新后调用时传 false —— 那个接口
+ *                      已经把刷新后的详情直接返回了,再拉一次 /detail 等于白跑一轮
+ *                      (每次 0.3~3s),这是 2026-11-22 顺手修掉的重复请求。
+ */
+async function loadSites(keepSelection = true, withDetail = true) {
   loading.value = true;
   error.value = '';
   try {
@@ -237,6 +254,10 @@ async function loadSites(keepSelection = true) {
       selectedId.value = tracked.value.length ? tracked.value[0].id : 0;
     }
     if (selectedId.value) {
+      if (!withDetail) {
+        detailLoading.value = false;
+        return
+      }
       // ⚠️ 不 await:详情可能现场抓站点(实测 0.3~3s),等它会拖住整个列表的渲染。
       // 列表先画出来,详情在后台补上(detailLoading 期间显示占位)。
       const seedSite = tracked.value.find(s => s.id === selectedId.value);
@@ -277,14 +298,31 @@ function selectSite(id) {
   loadDetail(id);
 }
 
+/**
+ * 全量刷新是后台跑的,前端只能「过一会儿再看一眼」。这些 setTimeout **必须登记**:
+ * 插件页是可切走的,组件卸载后定时器仍在跑,回调里 loadSites 会对着已卸载的组件
+ * 改状态 + 白发两个请求(2026-11-22 发现原来两条 setTimeout 完全没登记,也没清理)。
+ */
+const pendingTimers = [];
+
+function later(fn, ms) {
+  const id = setTimeout(() => {
+    const i = pendingTimers.indexOf(id);
+    if (i >= 0) pendingTimers.splice(i, 1);
+    fn();
+  }, ms);
+  pendingTimers.push(id);
+  return id
+}
+
 async function refreshAll() {
   busy.value = true;
   try {
     await req('post', '/refresh', {});
     toast('已开始全量刷新,稍后自动更新列表', 'info');
     // 后台刷新约 10~60 秒;这里做一次延迟重取 + 允许手动再点
-    setTimeout(() => loadSites(true), 12000);
-    setTimeout(() => loadSites(true), 40000);
+    later(() => loadSites(true), 12000);
+    later(() => loadSites(true), 40000);
   } catch (e) {
     toast(describeError(e), 'error');
   } finally {
@@ -299,7 +337,7 @@ async function refreshOne() {
   try {
     const data = await req('post', '/refresh', { site_id: site.id });
     detail.value = data;
-    await loadSites(true);
+    await loadSites(true, false);   // 详情已在上面拿到,别再拉一遍
     toast('已刷新该站点', 'success');
   } catch (e) {
     toast(describeError(e), 'error');
@@ -556,6 +594,17 @@ function roadmapBlocker(m) {
   }).join(' · ')
 }
 
+/**
+ * 目标值展示:分享率是比值,「目标 8 / 当前 7.19」两个数字看着像不同量纲,
+ * 统一给到 1~2 位小数(8 → 8.0,7.5 → 7.5);其余走 fmtNum 的千分位。
+ */
+function fmtTarget(key, v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return String(v ?? '-')
+  if (key === 'ratio' || key === 'true_ratio') return n.toFixed(2).replace(/0$/, '')
+  return fmtNum(n)
+}
+
 function riskColor(risk) {
   return risk === 'danger' ? 'error' : risk === 'warn' ? 'warning' : 'success'
 }
@@ -583,12 +632,17 @@ const tightestText = computed(() => {
   const r = tightest.value;
   if (!r) return ''
   const label = r.label || '-';
-  const target = fmtNum(r.target) + (r.unit || '');
+  const target = fmtTarget(r.key, r.target) + (r.unit || '');
   const current = (r.current === null || r.current === undefined) ? null : fmtNum(r.current);
   return current === null ? label : label + ' ' + current + '/' + target
 });
 
 onMounted(() => loadSites(true));
+
+onUnmounted(() => {
+  // 组件卸载 = 用户已经离开看板,挂着的「过会儿再看一眼」全部作废
+  while (pendingTimers.length) clearTimeout(pendingTimers.pop());
+});
 
 return (_ctx, _cache) => {
   const _component_VIcon = _resolveComponent("VIcon");
@@ -1055,7 +1109,7 @@ return (_ctx, _cache) => {
                                     default: _withCtx(() => [
                                       _createElementVNode("div", _hoisted_18, _toDisplayString(tightest.value.label), 1),
                                       _createElementVNode("div", _hoisted_19, [
-                                        _createTextVNode(" 当前 " + _toDisplayString(tightest.value.current === null ? '取不到' : _unref(fmtNum)(tightest.value.current) + tightest.value.unit) + " → 目标 " + _toDisplayString(_unref(fmtNum)(tightest.value.target)) + _toDisplayString(tightest.value.unit) + " ", 1),
+                                        _createTextVNode(" 当前 " + _toDisplayString(tightest.value.current === null ? '取不到' : _unref(fmtNum)(tightest.value.current) + tightest.value.unit) + " → 目标 " + _toDisplayString(fmtTarget(tightest.value.key, tightest.value.target)) + _toDisplayString(tightest.value.unit) + " ", 1),
                                         (typeof tightest.value.current === 'number' && tightest.value.target)
                                           ? (_openBlock(), _createElementBlock(_Fragment, { key: 0 }, [
                                               _createTextVNode(" · 还差 " + _toDisplayString(_unref(fmtNum)(Math.max(0, tightest.value.target - tightest.value.current))) + _toDisplayString(tightest.value.unit), 1)
@@ -1112,7 +1166,7 @@ return (_ctx, _cache) => {
                                     default: _withCtx(() => [
                                       _cache[30] || (_cache[30] = _createElementVNode("thead", null, [
                                         _createElementVNode("tr", null, [
-                                          _createElementVNode("th", { style: {"width":"46px"} }, "状态"),
+                                          _createElementVNode("th", { style: {"width":"58px","white-space":"nowrap"} }, "状态"),
                                           _createElementVNode("th", null, "条件"),
                                           _createElementVNode("th", { style: {"width":"120px"} }, "目标"),
                                           _createElementVNode("th", { style: {"width":"120px"} }, "当前"),
@@ -1133,7 +1187,7 @@ return (_ctx, _cache) => {
                                               }, null, 8, ["icon", "color"])
                                             ]),
                                             _createElementVNode("td", null, _toDisplayString(r.label), 1),
-                                            _createElementVNode("td", null, _toDisplayString(_unref(fmtNum)(r.target)) + _toDisplayString(r.unit), 1),
+                                            _createElementVNode("td", null, _toDisplayString(fmtTarget(r.key, r.target)) + _toDisplayString(r.unit), 1),
                                             _createElementVNode("td", null, _toDisplayString(r.current === null ? '取不到' : _unref(fmtNum)(r.current) + r.unit), 1),
                                             _createElementVNode("td", null, [
                                               (r.met)
@@ -1151,7 +1205,7 @@ return (_ctx, _cache) => {
                                 ]),
                                 _: 1
                               }))
-                            : (detail.value && !detail.value.reqs?.length)
+                            : (detail.value && !skeleton.value && !detail.value.reqs?.length)
                               ? (_openBlock(), _createBlock(_component_VAlert, {
                                   key: 3,
                                   type: "info",
@@ -1216,7 +1270,7 @@ return (_ctx, _cache) => {
                                                       : _createCommentVNode("", true)
                                                   ]))
                                                 }), 128)),
-                                                (!roadmapRows.value.length)
+                                                (!skeleton.value && !roadmapRows.value.length)
                                                   ? (_openBlock(), _createElementBlock("div", _hoisted_29, " 该站规则里没有保号档信息(仍可看下面的条款原文) "))
                                                   : _createCommentVNode("", true),
                                                 _createVNode(_component_VDivider, { class: "my-2" }),
@@ -1225,7 +1279,7 @@ return (_ctx, _cache) => {
                                                     key: 'k' + i
                                                   }, "✅ " + _toDisplayString(t), 1))
                                                 }), 128)),
-                                                (!(detail.value.keep_rules || []).length)
+                                                (!skeleton.value && !(detail.value.keep_rules || []).length)
                                                   ? (_openBlock(), _createElementBlock("div", _hoisted_30, "站点未提供保号条款"))
                                                   : _createCommentVNode("", true)
                                               ]))
@@ -1270,7 +1324,7 @@ return (_ctx, _cache) => {
                                               class: "mb-1"
                                             }, "⛔ " + _toDisplayString(t), 1))
                                           }), 128)),
-                                          (!detail.value?.ban_rules?.length)
+                                          (!skeleton.value && !detail.value?.ban_rules?.length)
                                             ? (_openBlock(), _createElementBlock("div", _hoisted_31, " 站点未提供(或不在公开页面)——请以站点公告为准 "))
                                             : _createCommentVNode("", true),
                                           (detail.value?.risks?.length)
@@ -1389,17 +1443,19 @@ return (_ctx, _cache) => {
                                   ]),
                                   _: 1
                                 }))
-                              : (_openBlock(), _createBlock(_component_VAlert, {
-                                  key: 1,
-                                  type: "info",
-                                  variant: "tonal",
-                                  density: "compact"
-                                }, {
-                                  default: _withCtx(() => [...(_cache[39] || (_cache[39] = [
-                                    _createTextVNode(" 该站没有可解析的等级阶梯 —— 站点未公开等级规则,可在插件配置里用「手动规则」补。 ", -1)
-                                  ]))]),
-                                  _: 1
-                                }))
+                              : (!skeleton.value)
+                                ? (_openBlock(), _createBlock(_component_VAlert, {
+                                    key: 1,
+                                    type: "info",
+                                    variant: "tonal",
+                                    density: "compact"
+                                  }, {
+                                    default: _withCtx(() => [...(_cache[39] || (_cache[39] = [
+                                      _createTextVNode(" 该站没有可解析的等级阶梯 —— 站点未公开等级规则,可在插件配置里用「手动规则」补。 ", -1)
+                                    ]))]),
+                                    _: 1
+                                  }))
+                                : _createCommentVNode("", true)
                           ], 64))
                         : (_openBlock(), _createElementBlock(_Fragment, { key: 3 }, [
                             (detail.value?.history?.length)
@@ -1561,17 +1617,19 @@ return (_ctx, _cache) => {
                                   ]),
                                   _: 1
                                 }))
-                              : (_openBlock(), _createBlock(_component_VAlert, {
-                                  key: 1,
-                                  type: "info",
-                                  variant: "tonal",
-                                  density: "compact"
-                                }, {
-                                  default: _withCtx(() => [...(_cache[46] || (_cache[46] = [
-                                    _createTextVNode(" 还没有历史快照 —— mp 的 siteuserdata 每天更新一行,攒几天后这里会出现曲线。 ", -1)
-                                  ]))]),
-                                  _: 1
-                                }))
+                              : (!skeleton.value)
+                                ? (_openBlock(), _createBlock(_component_VAlert, {
+                                    key: 1,
+                                    type: "info",
+                                    variant: "tonal",
+                                    density: "compact"
+                                  }, {
+                                    default: _withCtx(() => [...(_cache[46] || (_cache[46] = [
+                                      _createTextVNode(" 还没有历史快照 —— mp 的 siteuserdata 每天更新一行,攒几天后这里会出现曲线。 ", -1)
+                                    ]))]),
+                                    _: 1
+                                  }))
+                                : _createCommentVNode("", true)
                           ], 64))
                   ], 64))
             ]),
@@ -1831,6 +1889,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-efd971ec"]]);
+const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-21d94f67"]]);
 
 export { Page as default };
