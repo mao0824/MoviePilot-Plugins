@@ -887,6 +887,9 @@ class SiteLevelBoard(_PluginBase):
             "l1_updated": cur.get("updated_time"),
             "keep": self.__keep_status(ladder, order_now),
             "roadmap": self.__keep_roadmap(ladder, order_now, cur, hist, spec, live, live_hist),
+            # 该站有「经验值」这类站内成长指标时才给(目前只有 Rousi);没有门槛就不给目标,
+            # 前端据此只展示「当前经验 + 日均」,不画进度条、不给 ETA。
+            "exp_metric": self.__exp_metric(live, live_hist),
             # 站点侧实时信息(馒头官方 API 给的:最后登录 / 封存 / 警告)—— 白名单,不外带凭据
             "live_extras": {k: live[k] for k in
                             ("parked", "warned", "leech_warn", "last_login", "joined")
@@ -1515,6 +1518,8 @@ class SiteLevelBoard(_PluginBase):
                 return self.__live_mteam(site)
             if "pttime" in domain:
                 return self.__live_pttime(site)
+            if "rousi" in domain:
+                return self.__live_rousi(site)
         except Exception as e:
             logger.warn(f"【站点等级看板】读取 {site.get('name')} 站点页/API 失败(回落 siteuserdata):{e}")
         return {}
@@ -1646,6 +1651,58 @@ class SiteLevelBoard(_PluginBase):
             logger.info(f"【站点等级看板】PT时间等级校验页成功:等级 {out.get('level')}")
         return out
 
+    def __live_rousi(self, site: Dict[str, Any]) -> Dict[str, Any]:
+        """Rousi Pro 官方 API —— 该站等级**由经验值决定**,不是上传/分享率。
+
+        `GET https://rousi.pro/api/v1/profile`(头:`api-token: <site.apikey>`),返回
+        `{level: 3, level_text: "Lv.3", experience: 12583.05, karma: 229198, ...}`。
+
+        ⚠️ 各等级的经验门槛**拿不到**:全站只有 `/api/v1/admin/settings/progression/levels`,
+        用站点 apikey 打是 401(staff 专属)。所以这里只取事实(等级/经验/流量),
+        **不塞 target** —— 猜一个阈值就会造出看起来精确、实际错的 ETA。
+        另注:容器直连 rousi.pro 会 SSL 握手超时,必须走 `__http_request` 里的站点代理。
+        """
+        key = str(site.get("apikey") or "").strip()
+        if not key:
+            logger.warn("【站点等级看板】Rousi 未配置 apikey,跳过官方 API(回落 siteuserdata)")
+            return {}
+        text = self.__http_request(site, "https://rousi.pro/api/v1/profile", "GET",
+                                   extra_headers={"api-token": key,
+                                                  "Accept": "application/json"})
+        if not text:
+            return {}
+        try:
+            data = (json.loads(text) or {}).get("data") or {}
+        except ValueError:
+            logger.warn(f"【站点等级看板】Rousi 返回不是 JSON:{text[:120]}")
+            return {}
+        if not isinstance(data, dict) or not data:
+            return {}
+
+        out: Dict[str, Any] = {}
+        if data.get("level_text"):
+            out["level"] = str(data["level_text"])
+        for src, dst in (("uploaded", "upload"), ("downloaded", "download")):
+            if isinstance(data.get(src), (int, float)):
+                out[dst] = float(data[src])
+        if isinstance(data.get("ratio"), (int, float)):
+            out["ratio"] = float(data["ratio"])
+        if isinstance(data.get("karma"), (int, float)):
+            out["bonus"] = float(data["karma"])              # 魔力值
+        if isinstance(data.get("experience"), (int, float)):
+            out["experience"] = float(data["experience"])    # ← 该站唯一的晋级指标
+        sl = data.get("seeding_leeching_data") or {}
+        if isinstance(sl.get("seeding_count"), (int, float)):
+            out["seeding"] = float(sl["seeding_count"])
+        if isinstance(sl.get("leeching_count"), (int, float)):
+            out["leeching"] = float(sl["leeching_count"])
+        if data.get("registered_at"):
+            out["joined"] = str(data["registered_at"])[:10]
+        if out:
+            logger.info(f"【站点等级看板】Rousi API 成功:等级 {out.get('level')} · "
+                        f"经验 {out.get('experience')}")
+        return out
+
     def __http_get(self, site: Dict[str, Any], url: str) -> str:
         return self.__http_request(site, url, "GET")
 
@@ -1716,6 +1773,36 @@ class SiteLevelBoard(_PluginBase):
             if SiteLevelBoard.__norm_level(lv.get("name")) in name:
                 return lv["order"]
         return None
+
+    @staticmethod
+    def __exp_metric(live: Dict[str, Any],
+                     live_hist: Optional[List[Dict[str, Any]]]) -> Optional[Dict[str, Any]]:
+        """经验值指标:只给「现在多少 + 每天涨多少」,不给目标(门槛未公开)。
+
+        增速用首末样本差 ÷ 实际天数,而不是中位数斜率 —— 经验是单调累加的,
+        首末差最贴近「照这个速度还要多久」的直觉;样本不足 2 条或跨度 <12h 就返回 None,
+        宁可写「待积累」也不给一个抖出来的数。
+        """
+        cur = live.get("experience")
+        if not isinstance(cur, (int, float)):
+            return None
+        per_day = None
+        pts = [e for e in (live_hist or []) if isinstance(e.get("experience"), (int, float))]
+        if len(pts) >= 2:
+            first, last = pts[0], pts[-1]
+            try:
+                ta = datetime.fromisoformat(str(first.get("updated_time") or first.get("updated_day")
+                                               or "").replace(" ", "T"))
+                tb = datetime.fromisoformat(str(last.get("updated_time") or last.get("updated_day")
+                                              or "").replace(" ", "T"))
+                days = (tb - ta).total_seconds() / 86400
+                delta = float(last["experience"]) - float(first["experience"])
+                if days >= 0.5 and delta >= 0:
+                    per_day = round(delta / days, 1)
+            except Exception:
+                per_day = None
+        return {"current": round(float(cur), 2), "per_day": per_day,
+                "target": None, "unit": "经验", "days": len(pts)}
 
     @staticmethod
     def __median_slope(hist: List[Dict[str, Any]], key: str) -> Optional[float]:

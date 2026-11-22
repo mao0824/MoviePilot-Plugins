@@ -1069,7 +1069,7 @@ onUnmounted(() => {
           </VAlert>
           <VAlert v-else-if="detail && !skeleton && !detail.has_ladder" type="info" variant="tonal"
                   density="compact" class="mb-3">
-            该站没有公开等级门槛({{ detail.level || '当前等级' }} 是从 mp 每日快照读到的实际等级)。
+            该站没有公开等级门槛({{ detail.level || '当前等级' }} 是站点实际等级)。
             拿不到门槛就不推算下一级、进度与 ETA —— 这类站常见于等级由经验值/站内成长决定的站点。
             若你知道规则,可在插件配置里用「手动规则」补上。
           </VAlert>
@@ -1078,6 +1078,31 @@ onUnmounted(() => {
             当前等级「{{ detail.level || '?' }}」在已解析的阶梯里没有对上档位,条件无法评估 ——
             多半是站点改了等级名。下面仍显示等级阶梯原文,可核对。
           </VAlert>
+
+          <!-- 站内成长指标(目前只有 Rousi 给经验值):给数字,不给目标,也不画进度条 -->
+          <VCard v-if="detail?.exp_metric" variant="outlined" class="mb-3">
+            <VCardTitle class="text-subtitle-2 d-flex align-center">
+              <VIcon icon="mdi-chart-timeline-variant" start size="18" color="primary" />
+              经验值(该站等级由经验决定)
+            </VCardTitle>
+            <VDivider />
+            <VCardText class="text-body-2">
+              <span class="text-h6 font-weight-medium">{{ fmtNum(detail.exp_metric.current) }}</span>
+              <span class="text-medium-emphasis"> 经验</span>
+              <template v-if="detail.exp_metric.per_day !== null">
+                <span class="ml-2 text-caption">日均 <b>+{{ detail.exp_metric.per_day }}</b>
+                  <span class="text-medium-emphasis">({{ detail.exp_metric.days }} 个样本)</span>
+                </span>
+              </template>
+              <span v-else class="ml-2 text-caption text-medium-emphasis">
+                日均待积累 —— 需要连续几天的样本才敢给速度
+              </span>
+              <div class="text-caption text-medium-emphasis mt-1">
+                站点未公开各级经验门槛,所以这里只如实展示经验值本身,不推算「还差多少 / 多久升级」。
+                数值取自站点官方 API,不是 mp 的每日快照。
+              </div>
+            </VCardText>
+          </VCard>
 
           <!-- 保号 / 封号 -->
           <VRow class="mb-1">
