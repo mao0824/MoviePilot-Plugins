@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import { d as describeError, u as unwrapResponse } from './utils-xMnE5CKH.js';
+import { d as describeError, u as unwrapResponse } from './utils-Cg0L6Kfq.js';
 
 const {createElementVNode:_createElementVNode,resolveComponent:_resolveComponent,openBlock:_openBlock,createBlock:_createBlock,createCommentVNode:_createCommentVNode,toDisplayString:_toDisplayString,createTextVNode:_createTextVNode,withCtx:_withCtx,createVNode:_createVNode} = await importShared('vue');
 
@@ -53,6 +53,7 @@ const form = ref({
   timeout: 20,
   manual_first: false,
   manual_rules: '',
+  level_aliases: '',
   debug: false,
 });
 
@@ -124,8 +125,8 @@ return (_ctx, _cache) => {
     class: "pa-4"
   }, {
     default: _withCtx(() => [
-      _cache[24] || (_cache[24] = _createElementVNode("div", { class: "text-h6 mb-1" }, "站点等级看板 · 配置", -1)),
-      _cache[25] || (_cache[25] = _createElementVNode("div", { class: "text-caption text-medium-emphasis mb-3" }, " 站点列表的增删在「数据」页(左侧列表 + 新增站点)。 ", -1)),
+      _cache[26] || (_cache[26] = _createElementVNode("div", { class: "text-h6 mb-1" }, "站点等级看板 · 配置", -1)),
+      _cache[27] || (_cache[27] = _createElementVNode("div", { class: "text-caption text-medium-emphasis mb-3" }, " 站点列表的增删在「数据」页(左侧列表 + 新增站点)。 ", -1)),
       (loading.value)
         ? (_openBlock(), _createBlock(_component_VProgressLinear, {
             key: 0,
@@ -154,7 +155,7 @@ return (_ctx, _cache) => {
       }, {
         default: _withCtx(() => [
           _createVNode(_component_VCardTitle, { class: "text-subtitle-2" }, {
-            default: _withCtx(() => [...(_cache[17] || (_cache[17] = [
+            default: _withCtx(() => [...(_cache[18] || (_cache[18] = [
               _createTextVNode("① 通用", -1)
             ]))]),
             _: 1
@@ -312,7 +313,7 @@ return (_ctx, _cache) => {
       }, {
         default: _withCtx(() => [
           _createVNode(_component_VCardTitle, { class: "text-subtitle-2" }, {
-            default: _withCtx(() => [...(_cache[18] || (_cache[18] = [
+            default: _withCtx(() => [...(_cache[19] || (_cache[19] = [
               _createTextVNode("② 通知(三个开关可任意组合)", -1)
             ]))]),
             _: 1
@@ -408,7 +409,7 @@ return (_ctx, _cache) => {
       }, {
         default: _withCtx(() => [
           _createVNode(_component_VCardTitle, { class: "text-subtitle-2" }, {
-            default: _withCtx(() => [...(_cache[19] || (_cache[19] = [
+            default: _withCtx(() => [...(_cache[20] || (_cache[20] = [
               _createTextVNode("③ 数据源", -1)
             ]))]),
             _: 1
@@ -486,7 +487,7 @@ return (_ctx, _cache) => {
       }, {
         default: _withCtx(() => [
           _createVNode(_component_VCardTitle, { class: "text-subtitle-2" }, {
-            default: _withCtx(() => [...(_cache[20] || (_cache[20] = [
+            default: _withCtx(() => [...(_cache[21] || (_cache[21] = [
               _createTextVNode("④ 规则与兜底", -1)
             ]))]),
             _: 1
@@ -511,7 +512,18 @@ return (_ctx, _cache) => {
                 "hide-details": "",
                 placeholder: "域名|等级名|条件表达式,如:m-team.cc|Power User|下载>=200;也兼容旧的站点ID写法"
               }, null, 8, ["modelValue"]),
-              _cache[21] || (_cache[21] = _createElementVNode("div", { class: "text-caption text-medium-emphasis mt-2" }, " 站点不公开等级门槛时(如馒头)用内置快照兜底,数据页会标注来源与快照日期;有更准的门槛可填在这里覆盖。 ", -1))
+              _cache[22] || (_cache[22] = _createElementVNode("div", { class: "text-caption text-medium-emphasis mt-2 mb-3" }, " 站点不公开等级门槛时(如馒头)用内置快照兜底,数据页会标注来源与快照日期;有更准的门槛可填在这里覆盖。 ", -1)),
+              _createVNode(_component_VTextarea, {
+                modelValue: form.value.level_aliases,
+                "onUpdate:modelValue": _cache[17] || (_cache[17] = $event => ((form.value.level_aliases) = $event)),
+                label: "等级名别名(每行一条)",
+                rows: "3",
+                density: "compact",
+                variant: "outlined",
+                "hide-details": "",
+                placeholder: "域名|站点显示的等级名|规则库里的等级名,如:ptskit.org|贵宾|VIP"
+              }, null, 8, ["modelValue"]),
+              _cache[23] || (_cache[23] = _createElementVNode("div", { class: "text-caption text-medium-emphasis mt-2" }, " 站点显示的等级名和规则库写法不一致时填这里(不必重抄整个阶梯)。 内置别名表已覆盖常见中英写法与括号别名;站点详情里「对不上档位」时会给出可复制的写法。 ", -1))
             ]),
             _: 1
           })
@@ -526,13 +538,13 @@ return (_ctx, _cache) => {
           loading: saving.value,
           onClick: save
         }, {
-          default: _withCtx(() => [...(_cache[22] || (_cache[22] = [
+          default: _withCtx(() => [...(_cache[24] || (_cache[24] = [
             _createTextVNode(" 保存配置 ", -1)
           ]))]),
           _: 1
         }, 8, ["loading"]),
         _createVNode(_component_VSpacer),
-        _cache[23] || (_cache[23] = _createElementVNode("span", { class: "text-caption text-medium-emphasis" }, "保存会重新初始化插件并刷新调度(等效插件列表里点保存)", -1))
+        _cache[25] || (_cache[25] = _createElementVNode("span", { class: "text-caption text-medium-emphasis" }, "保存会重新初始化插件并刷新调度(等效插件列表里点保存)", -1))
       ])
     ]),
     _: 1

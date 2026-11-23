@@ -215,6 +215,11 @@ def parse_file(path: str) -> Optional[Dict[str, Any]]:
     if len(ladder) < 2:
         return None
     ladder.sort(key=lambda x: x["order"])
+    # 档位编号统一成 1..N:depiler 的 levelRequirements id 有的从 0 起、有的从 1 起
+    # (实测 59 个从 0、114 个从 1、还有 1 个从 3 起)。编号只做相对比较,重排安全;
+    # 不统一则「离可封存还差 N 级」会整体差一档。
+    for idx, level in enumerate(ladder, start=1):
+        level["order"] = idx
     return {"domains": domains, "ladder": ladder}
 
 

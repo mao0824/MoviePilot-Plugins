@@ -33,7 +33,7 @@ import sqlite3
 import threading
 import time
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import requests
 from apscheduler.triggers.cron import CronTrigger
@@ -279,6 +279,24 @@ for _sid, _dom in BUILTIN_DOMAIN_MAP.items():
         LEVEL_SPECS_BY_DOMAIN[_dom] = LEVEL_SPECS[_sid]
 
 
+def _normalize_ladder(spec: Dict[str, Any]) -> None:
+    """把外部规则库的档位编号统一成 1..N。
+
+    PT-depiler 的 ``levelRequirements`` 有的从 0 编号、有的从 1 编号(实测 59 个从 0、
+    114 个从 1、还有 1 个从 3 起)。编号只用于**相对比较**(下一级 = 第一个 order 更大的档),
+    重排安全;不统一则「离可封存还差 N 级」会整体差一档。
+    """
+    ladder = spec.get("ladder")
+    if not isinstance(ladder, list) or not ladder:
+        return
+    try:
+        ladder.sort(key=lambda lv: (lv.get("order") is None, lv.get("order") or 0))
+    except Exception:
+        return
+    for idx, level in enumerate(ladder, start=1):
+        level["order"] = idx
+
+
 def _load_external_rules() -> int:
     """加载 level_specs.json(外部规则库)。内置站不覆盖,返回新增条数。"""
     global RULES_DATE
@@ -298,8 +316,13 @@ def _load_external_rules() -> int:
     added = 0
     for dom, spec in data.items():
         key = str(dom or "").lower().strip()
+        # depiler 里有 ``www.ptskit.org`` 这种带 www 的键,而 mp 的 site.domain 是
+        # ``ptskit.org`` —— 后缀候选只能往「更短」走,永远撞不上带 www 的键。
+        if key.startswith("www."):
+            key = key[4:]
         if not key or not isinstance(spec, dict) or key in LEVEL_SPECS_BY_DOMAIN:
             continue
+        _normalize_ladder(spec)
         LEVEL_SPECS_BY_DOMAIN[key] = spec
         added += 1
     return added
@@ -312,6 +335,116 @@ def _domain_candidates(domain: str) -> List[str]:
 
 
 _RULES_ADDED = _load_external_rules()
+
+
+# ===========================================================================
+# 等级名别名表(与域名无关的「等价组」)
+#   为什么必须有:``siteuserdata.user_level`` 存的是**站点页上显示的名字**,不是标准名。
+#   实测 PTS 的 user_level 出现过「贵宾」,而它的阶梯只有 User…Nexus Master ——
+#   原样比对必然对不上,只能显示「未知」。别名表把「同一档的不同写法」收敛成一个键。
+#
+#   口径:**宁缺勿错**。错映射会把档位算错、ETA 跟着错,比老实显示「未知」更糟。
+#   所以这里只收高置信度等价;同一组在一个阶梯里命中多档时,一律判歧义、不猜。
+# ===========================================================================
+ALIAS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "level_aliases.json")
+ALIAS_DATE = ""
+ALIAS_GROUPS: List[List[str]] = []      # 每组=一组等价写法(已归一化)
+ALIAS_CANONICAL: List[str] = []         # 与 ALIAS_GROUPS 同下标:该组的规范名
+ALIAS_INDEX: Dict[str, int] = {}        # 归一化写法 → 组下标
+
+_PAREN_RE = re.compile(r"[（(][^）)]*[）)]")
+_PAREN_INNER_RE = re.compile(r"[（(]([^）)]*)[）)]")
+# 「Lv.3 霜降」「3级 Power User」这类序号前缀:去掉它才是等级名本身
+_ORDINAL_RE = re.compile(r"^(?:lv\.?\s*\d+|\d+\s*[级等])\s*", re.I)
+
+
+def _norm_name(text: Any) -> str:
+    """归一化等级名:去括号注释、压空白、转小写 —— ``(幼儿园)User`` → ``user``。"""
+    return re.sub(r"\s+", " ", _PAREN_RE.sub("", str(text or ""))).strip().lower()
+
+
+def _ascii_name(text: Any) -> str:
+    """只留 ASCII 字母数字 —— 用来穿透「憨头憨脑 User」「User 咖啡新人」这类中英混排。"""
+    return re.sub(r"\s+", " ", re.sub(r"[^0-9A-Za-z]+", " ", str(text or ""))).strip().lower()
+
+
+def _name_keys(text: Any) -> Set[str]:
+    """一个等级名的全部可比较键:原文、括号内别名、纯 ASCII 投影、去空格投影。
+
+    括号别名是白捡的:PT-depiler 的站定义里本来就写 ``凡人(Power User)``、
+    ``黔首(Peasant)``、``冠军训练家(EU)`` —— 中英对照与缩写都在里面。
+    """
+    raw = str(text or "")
+    keys: Set[str] = set()
+    for part in [raw] + _PAREN_INNER_RE.findall(raw):
+        for key in (_norm_name(part), _ascii_name(part), _ascii_name(part).replace(" ", "")):
+            if key:
+                keys.add(key)
+    return keys
+
+
+def _expand_groups(keys: Set[str]) -> Set[str]:
+    """命中别名组的键展开成整组 —— 让「中级用户」与「Elite User」互相认得。"""
+    out = set(keys)
+    for key in keys:
+        gid = ALIAS_INDEX.get(key)
+        if gid is not None:
+            out.update(ALIAS_GROUPS[gid])
+    return out
+
+
+def _load_aliases() -> int:
+    """加载 level_aliases.json,返回等价组数。缺失/损坏只是少一层兜底,不能让插件起不来。"""
+    global ALIAS_DATE
+    try:
+        with open(ALIAS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return 0
+    except Exception as e:
+        logger.warn(f"【站点等级看板】别名表加载失败:{e}")
+        return 0
+    if not isinstance(data, dict):
+        return 0
+    ALIAS_DATE = str((data.get("_meta") or {}).get("date") or "")
+    for grp in (data.get("groups") or []):
+        if not isinstance(grp, dict):
+            continue
+        canonical = str(grp.get("canonical") or "").strip()
+        names: List[str] = []
+        for raw in [canonical] + list(grp.get("names") or []):
+            key = _norm_name(raw)
+            # 一个写法只能属于一个组:重复登记会让「同组多档」的歧义判断失效
+            if key and key not in ALIAS_INDEX:
+                names.append(key)
+        if len(names) < 2:
+            continue
+        gid = len(ALIAS_GROUPS)
+        ALIAS_GROUPS.append(names)
+        ALIAS_CANONICAL.append(canonical or names[0])
+        for key in names:
+            ALIAS_INDEX[key] = gid
+    return len(ALIAS_GROUPS)
+
+
+_ALIAS_GROUPS_LOADED = _load_aliases()
+
+
+def _parse_alias_rules(text: str) -> Dict[str, Dict[str, str]]:
+    """解析配置里的「域名|站点显示名|规则库等级名」,返回 ``{域名: {显示名: 标准名}}``。"""
+    out: Dict[str, Dict[str, str]] = {}
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [x.strip() for x in re.split(r"[|｜]", line)]
+        if len(parts) < 3:
+            continue
+        domain, shown, canonical = parts[0].lower().lstrip("*."), parts[1], parts[2]
+        if not domain or not shown or not canonical:
+            continue
+        out.setdefault(domain, {})[_norm_name(shown)] = canonical
+    return out
 
 
 class TrackPayload(BaseModel):
@@ -350,6 +483,7 @@ class ConfigPayload(BaseModel):
     timeout: Optional[int] = None
     manual_rules: Optional[str] = None
     manual_first: Optional[bool] = None
+    level_aliases: Optional[str] = None
 
 
 class SiteLevelBoard(_PluginBase):
@@ -358,7 +492,7 @@ class SiteLevelBoard(_PluginBase):
     plugin_desc = "把绑定站点的等级、晋级条件、ETA(预计多久到下一级)、保号与封号风险汇成一页,附流量时间线。"
     # 裸文件名只会去 mp 内置 plugin_icon/ 里找(没有我们的图标),所以用本仓库的 raw 地址自带图标
     plugin_icon = "https://raw.githubusercontent.com/mao0824/MoviePilot-Plugins/main/icons/level-board.png"
-    plugin_version = "0.2.0"
+    plugin_version = "0.3.0"
     plugin_author = "Niven"
     author_url = "https://github.com/mao0824"
     plugin_config_prefix = "sitelevelboard_"
@@ -390,6 +524,8 @@ class SiteLevelBoard(_PluginBase):
     # ---- 手动规则 ----------------------------------------------------------
     _manual_rules = ""
     _manual_first = False
+    _level_aliases = ""                     # 「域名|站点显示名|规则库等级名」每行一条
+    _level_alias_map: Dict[str, Dict[str, str]] = {}
 
     _lock = threading.Lock()
 
@@ -437,6 +573,8 @@ class SiteLevelBoard(_PluginBase):
 
         self._manual_rules = (cfg.get("manual_rules") or "").strip()
         self._manual_first = bool(cfg.get("manual_first"))
+        self._level_aliases = (cfg.get("level_aliases") or "").strip()
+        self._level_alias_map = _parse_alias_rules(self._level_aliases)
 
         if cfg.get("run_once"):
             logger.info("【站点等级看板】检测到「保存后立即运行一次」,后台刷新")
@@ -593,8 +731,16 @@ class SiteLevelBoard(_PluginBase):
                                             "域名|等级名|条件表达式,如:m-team.cc|Power User|下载>=200;"
                                             "也兼容旧的站点ID写法(2|Lv.4|经验>=20000)"),
                         ]),
-                        self.__alert("站点不公开等级门槛时(如馒头)用内置快照兜底,UI 会标注来源与快照日期;"
-                                     "快照可能滞后,若你手上有更准的门槛,填在这里覆盖。",
+                        self.__row([
+                            self.__textarea("level_aliases", "等级名别名(每行一条)", 12, 3,
+                                            "域名|站点显示名|规则库等级名,如:ptskit.org|贵宾|VIP;"
+                                            "站点显示的等级名与规则库写法不一致时填这里(不必重抄整个阶梯)"),
+                        ]),
+                        self.__alert("站点不公开等级门槛时(如馒头)用内置规则库兜底,UI 会标注来源与快照日期;"
+                                     "快照可能滞后,若你手上有更准的门槛,填在「手动等级规则」里覆盖。"
+                                     "等级名对不上(如站点写「贵宾」、规则库写「VIP」)时,先用「等级名别名」补;"
+                                     "内置别名表 %d 组(快照 %s),对不上会在站点详情里直接告诉你。"
+                                     % (len(ALIAS_GROUPS), ALIAS_DATE or "-"),
                                      "info", 12),
                     ]),
                 ],
@@ -620,6 +766,7 @@ class SiteLevelBoard(_PluginBase):
                 "timeout": 20,
                 "manual_rules": "",
                 "manual_first": False,
+                "level_aliases": "",
             },
         ]
 
@@ -709,6 +856,8 @@ class SiteLevelBoard(_PluginBase):
                 "username": usernames.get(site.get("domain") or ""),
                 "active": bool(site.get("is_active")),
                 "level": c.get("level"), "next_level": c.get("next_level"),
+                # 等级名匹配的软硬程度:exact/alias/off_ladder/none… 前端据此标「别名匹配」
+                "level_match": c.get("level_match"), "level_alias": c.get("level_alias"),
                 "has_ladder": bool(has_ladder), "is_top": bool(is_top),
                 "eta_days": c.get("eta_days"), "confidence": c.get("confidence"),
                 "manual_blocked": c.get("manual_blocked"), "progress": c.get("progress"),
@@ -735,7 +884,9 @@ class SiteLevelBoard(_PluginBase):
                                    "active": bool(site.get("is_active"))})
         return schemas.Response(success=True, data={
             "tracked": tracked, "candidates": candidates,
-            "last_refresh": state.get("time"), "snapshot_date": RULES_DATE})
+            "last_refresh": state.get("time"), "snapshot_date": RULES_DATE,
+            # 别名表规模:让用户知道「等级名对不上」时插件到底做了多少努力
+            "alias_groups": len(ALIAS_GROUPS), "alias_date": ALIAS_DATE})
 
     def api_detail(self, site_id: int = 0, live: int = 0):
         """单站详情:内存缓存 → level_state 缓存 → 现场评估(顺带回填缓存)。
@@ -909,7 +1060,8 @@ class SiteLevelBoard(_PluginBase):
         level_name = live.get("level") or cur.get("user_level") or ""
 
         ladder = spec.get("ladder") or []
-        order_now = self.__match_order(ladder, level_name)
+        matched = self.__resolve_level(ladder, level_name, domain)
+        order_now = matched["order"]
         next_level = None
         if order_now is not None:
             for lv in ladder:
@@ -929,6 +1081,10 @@ class SiteLevelBoard(_PluginBase):
         r = {
             "site_id": sid, "site_name": site.get("name"), "domain": domain,
             "level": level_name, "level_order": order_now,
+            # 等级名是怎么对上的 —— 前端要能区分「原文一致」和「靠别名猜的」,
+            # 后者要显式标出来让人复核(档位错一级,ETA 全错)
+            "level_match": matched["how"],
+            "level_alias": matched["matched"] if matched["how"] not in ("exact", "empty") else None,
             "next_level": (next_level or {}).get("name"),
             "next_order": (next_level or {}).get("order"),
             # 「没有下一级」有两种完全不同的原因,前端必须分开说,不能都写成「已最高」:
@@ -1785,23 +1941,113 @@ class SiteLevelBoard(_PluginBase):
     # =====================================================================
     @staticmethod
     def __norm_level(name: str) -> str:
-        """等级名归一化:去掉站点加的中文档位前缀,再比大小 —— 如 ``(幼儿园)User`` → ``user``。"""
-        text = re.sub(r"[（(][^）)]*[）)]", "", str(name or ""))
-        return re.sub(r"\s+", " ", text).strip().lower()
+        """等级名归一化(去括号注释 + 压空白 + 小写),与模块级 ``_norm_name`` 同一口径。"""
+        return _norm_name(name)
 
-    @staticmethod
-    def __match_order(ladder: List[Dict[str, Any]], level_name: str) -> Optional[int]:
-        if not level_name:
+    def __user_alias(self, domain: str, level_name: str) -> Optional[str]:
+        """配置里「域名|站点显示名|规则库等级名」的映射优先于内置别名表。
+
+        内置表只敢收「高置信度等价」;具体某个站的怪写法由用户自己补,这才是
+        发布版该有的样子 —— 不能指望作者预判 290 个站的全部写法。
+        """
+        table = getattr(self, "_level_alias_map", None)
+        if not table:
             return None
-        name = SiteLevelBoard.__norm_level(level_name)
-        for lv in ladder:
-            if SiteLevelBoard.__norm_level(lv.get("name")) == name:
-                return lv["order"]
-        # 容错:站点可能写作 "Crazy User (Crazy)" / "(幼儿园)User" 之类
-        for lv in ladder:
-            if SiteLevelBoard.__norm_level(lv.get("name")) in name:
-                return lv["order"]
+        key = _norm_name(level_name)
+        for cand in _domain_candidates(domain):
+            hit = table.get(cand)
+            if hit and key in hit:
+                return hit[key]
         return None
+
+    def __resolve_level(self, ladder: List[Dict[str, Any]], level_name: str,
+                        domain: str = "") -> Dict[str, Any]:
+        """把「站点显示的等级名」解析成阶梯里的档位。
+
+        返回 ``{"order", "how", "matched"}``,``how`` 说明这次匹配有多硬:
+          exact       原文一致(最可信)
+          compact     只差空格/大小写(PowerUser / POWER USER)
+          alias       靠括号别名 / 中英混排 / 别名组对上(如「贵宾」→ VIP)
+          user_alias  靠配置里的手动别名对上
+          ambiguous   别名组在该站阶梯里命中多档 → **不猜**
+          off_ladder  认得出是哪一档,但这站阶梯里没有这一档(如 PTS 的「贵宾」)
+          none        完全对不上
+          empty       站点没给等级名
+        分阶段是刻意的:能精确就不猜,能靠别名就不做模糊包含 —— 档位错一级,ETA 全错。
+        """
+        name = str(level_name or "").strip()
+        if not name:
+            return {"order": None, "how": "empty", "matched": None}
+        if not ladder:
+            return {"order": None, "how": "none", "matched": None}
+
+        override = self.__user_alias(domain, name)
+        if override:
+            name = override
+
+        target = _norm_name(name)
+        target_compact = target.replace(" ", "")
+        target_ascii = _ascii_name(name).replace(" ", "")
+        target_keys = _expand_groups(_name_keys(name))
+        target_residual = _norm_name(_ORDINAL_RE.sub("", target)) or target
+        entries = [(lv, _expand_groups(_name_keys(lv.get("name")))) for lv in ladder]
+
+        def hit(lv: Dict[str, Any], how: str) -> Dict[str, Any]:
+            return {"order": lv.get("order"),
+                    "how": "user_alias" if override else how,
+                    "matched": lv.get("name")}
+
+        # 1) 原文一致
+        for lv, _ in entries:
+            if _norm_name(lv.get("name")) == target:
+                return hit(lv, "exact")
+
+        # 2) 只差空格/大小写(PowerUser / POWER USER)—— 这才是真正的「同一串字符」
+        if target_compact:
+            same = [lv for lv, _ in entries
+                    if _norm_name(lv.get("name")).replace(" ", "") == target_compact]
+            if len(same) == 1:
+                return hit(same[0], "compact")
+
+        # 3) 只留 ASCII 后一致 —— 穿透「憨头憨脑 User」「满面娇憨 Nexus Master」
+        #    ⚠️ 与 2) 必须分开:这一档已经**丢掉了中文信息**,属于推断,不是同一串字符。
+        if target_ascii:
+            same = [lv for lv, _ in entries
+                    if _ascii_name(lv.get("name")).replace(" ", "") == target_ascii]
+            if len(same) == 1:
+                return hit(same[0], "alias")
+
+        # 4) 别名:括号别名 / 等价组(中文名、缩写)
+        scored: List[Tuple[Dict[str, Any], int]] = []
+        for lv, keys in entries:
+            common = target_keys & keys
+            if common:
+                scored.append((lv, max(len(k) for k in common)))
+        if scored:
+            best = max(score for _, score in scored)
+            top = [lv for lv, score in scored if score == best]
+            if len(top) == 1:
+                return hit(top[0], "alias")
+            return {"order": None, "how": "ambiguous", "matched": None}
+
+        # 5) 去掉「Lv.3」「3级」这类序号前缀后再比(节气/修仙主题站常见)。
+        #    序号可能长在站点显示名上,也可能长在规则库的档位名上,两边都要剥。
+        for lv, _ in entries:
+            lv_norm = _norm_name(lv.get("name"))
+            lv_residual = _norm_name(_ORDINAL_RE.sub("", lv_norm)) or lv_norm
+            if not target_residual or target_residual != lv_residual:
+                continue
+            if target_residual == target and lv_residual == lv_norm:
+                continue            # 两边都没剥掉东西 = 上面几级已经比过了
+            return hit(lv, "alias")
+
+        # 6) 认得出是哪一档,但这站阶梯里没这一档 —— 比「未知」多说一句实话
+        for key in target_keys:
+            gid = ALIAS_INDEX.get(key)
+            if gid is not None:
+                return {"order": None, "how": "off_ladder", "matched": ALIAS_CANONICAL[gid]}
+
+        return {"order": None, "how": "none", "matched": None}
 
     @staticmethod
     def __median_slope(hist: List[Dict[str, Any]], key: str) -> Optional[float]:

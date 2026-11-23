@@ -1,0 +1,63 @@
+{
+  "_meta": {
+    "date": "2026-11-23",
+    "note": "等级名等价表。同一档在不同站点/语言/主题下写法不同,这里只收「高置信度等价」:错映射会算错 ETA,比不映射更糟。",
+    "sources": [
+      "PT-depiler 站点定义里的括号别名(如 凡人(Power User)),按站点自动派生,不写死在这张表里",
+      "NexusPHP 官方 lang/chs 等级名(实测保留英文,故中文名属于站点自定义,只能保守收录)",
+      "实站观测:PTS 的 user_level 曾出现「贵宾」(VIP 档),阶梯里没有该档"
+    ],
+    "rule": "同组内任一写法视为同一档;若某个阶梯里同组命中多档,一律判为歧义、不猜。"
+  },
+  "groups": [
+    {
+      "canonical": "Peasant",
+      "names": ["乞丐", "农民", "贫民", "流民"]
+    },
+    {
+      "canonical": "User",
+      "names": ["用户", "普通用户", "平民", "注册用户"]
+    },
+    {
+      "canonical": "Power User",
+      "names": ["初级用户", "电力用户", "进阶用户", "PU", "Power"]
+    },
+    {
+      "canonical": "Elite User",
+      "names": ["中级用户", "精英用户", "EU", "Elite"]
+    },
+    {
+      "canonical": "Crazy User",
+      "names": ["高级用户", "疯狂用户", "CU", "Crazy"]
+    },
+    {
+      "canonical": "Insane User",
+      "names": ["极端用户", "狂热用户", "IU", "Insane"]
+    },
+    {
+      "canonical": "Veteran User",
+      "names": ["资深用户", "老会员", "VU", "Veteran"]
+    },
+    {
+      "canonical": "Extreme User",
+      "names": ["超级用户", "极限用户", "XU", "Extreme"]
+    },
+    {
+      "canonical": "Ultimate User",
+      "names": ["终极用户", "究极用户", "UU", "Ultimate"]
+    },
+    {
+      "canonical": "Nexus Master",
+      "names": ["骨灰级用户", "骨灰用户", "Nexus 大师", "NM", "Master"]
+    },
+    {
+      "canonical": "VIP",
+      "names": ["贵宾", "贵宾用户", "赞助会员", "赞助用户", "捐赠会员"]
+    },
+    {
+      "canonical": "Leech",
+      "names": ["吸血用户", "下载用户", "Leeching"]
+    }
+  ],
+  "domain": {}
+}

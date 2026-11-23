@@ -40,6 +40,7 @@ const form = ref({
   timeout: 20,
   manual_first: false,
   manual_rules: '',
+  level_aliases: '',
   debug: false,
 })
 
@@ -179,8 +180,15 @@ async function save() {
         <VTextarea v-model="form.manual_rules" label="手动等级规则(每行一条)" rows="4" density="compact"
                    variant="outlined" hide-details
                    placeholder="域名|等级名|条件表达式,如:m-team.cc|Power User|下载>=200;也兼容旧的站点ID写法" />
-        <div class="text-caption text-medium-emphasis mt-2">
+        <div class="text-caption text-medium-emphasis mt-2 mb-3">
           站点不公开等级门槛时(如馒头)用内置快照兜底,数据页会标注来源与快照日期;有更准的门槛可填在这里覆盖。
+        </div>
+        <VTextarea v-model="form.level_aliases" label="等级名别名(每行一条)" rows="3" density="compact"
+                   variant="outlined" hide-details
+                   placeholder="域名|站点显示的等级名|规则库里的等级名,如:ptskit.org|贵宾|VIP" />
+        <div class="text-caption text-medium-emphasis mt-2">
+          站点显示的等级名和规则库写法不一致时填这里(不必重抄整个阶梯)。
+          内置别名表已覆盖常见中英写法与括号别名;站点详情里「对不上档位」时会给出可复制的写法。
         </div>
       </VCardText>
     </VCard>

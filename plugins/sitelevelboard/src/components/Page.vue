@@ -8,7 +8,8 @@
  */
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import {
-  CONFIDENCE_LABEL, SOURCE_LABEL, describeError, fmtEta, fmtGb, fmtNum, unwrapResponse,
+  CONFIDENCE_LABEL, LEVEL_MATCH_LABEL, SOURCE_LABEL, describeError, fmtEta, fmtGb, fmtNum,
+  isSoftMatch, unwrapResponse,
 } from '../utils'
 
 const props = defineProps({
@@ -630,6 +631,23 @@ function nextText(s) {
   return s.is_top ? '已最高' : '未知'
 }
 
+/**
+ * 等级名的匹配说明。原文一致就没什么好说的;靠别名/空格差异对上的必须说清
+ * 「站点写的是什么、对到了哪一档」—— 档位错一级,ETA 全错,不能让人以为一样可信。
+ */
+function levelMatchTip(s) {
+  if (!s || !s.level_match || s.level_match === 'exact') return ''
+  const label = LEVEL_MATCH_LABEL[s.level_match] || s.level_match
+  const alias = s.level_alias ? ` → ${s.level_alias}` : ''
+  return `${label}:站点显示「${s.level || '?'}」${alias}`
+}
+
+/** 「对不上档位」时给一句能直接抄进配置的别名写法,别让人对着文档猜格式。 */
+function aliasSuggestion(s) {
+  if (!s || !s.level || !s.domain) return ''
+  return `${s.domain}|${s.level}|<规则库里的等级名>`
+}
+
 
 /** 当前站点有没有风险 —— 显示成「等级概览」页签上的小圆点,人在别的页签也能看见。 */
 const riskLevel = computed(() => {
@@ -812,8 +830,10 @@ onUnmounted(() => {
                   <div class="slb-cname text-body-2">{{ s.name }}</div>
                   <div class="text-caption text-medium-emphasis slb-cdomain">{{ s.domain || '-' }}</div>
                 </td>
-                <td class="text-caption text-no-wrap">
+                <td class="text-caption text-no-wrap" :title="levelMatchTip(s)">
                   <span class="font-weight-medium">{{ s.level || '?' }}</span>
+                  <VIcon v-if="isSoftMatch(s.level_match)" icon="mdi-approximately-equal"
+                         size="12" color="warning" />
                   <span class="text-medium-emphasis"> → {{ nextText(s) }}</span>
                 </td>
                 <td>
@@ -892,7 +912,10 @@ onUnmounted(() => {
             >
               <VListItemTitle class="text-body-2 d-flex align-center ga-1">
                 <span class="slb-name">{{ s.name }}</span>
-                <VChip size="x-small" variant="tonal" class="flex-shrink-0">{{ s.level || '?' }}</VChip>
+                <VChip size="x-small" variant="tonal" class="flex-shrink-0"
+                       :title="levelMatchTip(s)">{{ s.level || '?' }}</VChip>
+                <VIcon v-if="isSoftMatch(s.level_match)" icon="mdi-approximately-equal"
+                       size="12" color="warning" :title="levelMatchTip(s)" />
               </VListItemTitle>
               <VListItemSubtitle class="text-caption slb-sub">
                 <span class="slb-domain">{{ s.domain || '-' }}</span>
@@ -964,6 +987,10 @@ onUnmounted(() => {
                   </div>
                   <div>
                     <b>数据更新</b>{{ detail.l1_updated || '-' }}
+                  </div>
+                  <div v-if="detail.level_match && detail.level_match !== 'exact'">
+                    <b>等级名匹配</b>{{ LEVEL_MATCH_LABEL[detail.level_match] || detail.level_match
+                    }}<template v-if="detail.level_alias"> · 「{{ detail.level }}」→ {{ detail.level_alias }}</template>
                   </div>
                   <div v-if="liveExtraText">
                     <b>站点侧</b>{{ liveExtraText }}
@@ -1073,10 +1100,23 @@ onUnmounted(() => {
             拿不到门槛就不推算下一级、进度与 ETA —— 这类站常见于等级由经验值/站内成长决定的站点。
             若你知道规则,可在插件配置里用「手动规则」补上。
           </VAlert>
+          <VAlert v-else-if="detail && !skeleton && detail.level_match === 'off_ladder'"
+                  type="info" variant="tonal" density="compact" class="mb-3">
+            该站当前等级「{{ detail.level }}」属于 <b>{{ detail.level_alias }}</b> 档,
+            而这一档不在它的晋级阶梯里(捐赠/贵宾这类特殊身份常见如此)。
+            没有对应档位就不推算下一级与 ETA —— 猜一个只会误导。
+          </VAlert>
+          <VAlert v-else-if="detail && !skeleton && detail.level_match === 'ambiguous'"
+                  type="warning" variant="tonal" density="compact" class="mb-3">
+            等级名「{{ detail.level }}」在别名表里同时对上多个档位,插件不替你猜 ——
+            请在插件配置的「等级名别名」里写明它对应哪一档,再刷新本站。
+          </VAlert>
           <VAlert v-else-if="detail && !skeleton" type="warning" variant="tonal"
                   density="compact" class="mb-3">
             当前等级「{{ detail.level || '?' }}」在已解析的阶梯里没有对上档位,条件无法评估 ——
-            多半是站点改了等级名。下面仍显示等级阶梯原文,可核对。
+            多半是站点用了自己的等级名。下面仍显示等级阶梯原文,可核对;
+            确认对应关系后填一行别名(插件配置 → 等级名别名):
+            <code>{{ aliasSuggestion(detail) }}</code>
           </VAlert>
 
           <!-- 保号 / 封号 -->

@@ -45,6 +45,26 @@ const SOURCE_LABEL = {
   error: '评估失败',
 };
 
+/**
+ * 等级名的匹配强度。exact 之外都要显式标出来:
+ * 「靠别名猜的档位」和「原文一致的档位」可信度不一样,混在一起看会把猜的当成的。
+ */
+const LEVEL_MATCH_LABEL = {
+  exact: '原文一致',
+  compact: '空格差异',
+  alias: '别名匹配',
+  user_alias: '自定义别名',
+  ambiguous: '别名歧义',
+  off_ladder: '不在阶梯内',
+  none: '未识别',
+  empty: '站点未给等级',
+};
+
+/** 需要让人复核的匹配方式(不是原文一致,就不能装作一样可信)。 */
+function isSoftMatch(how) {
+  return how === 'alias' || how === 'compact' || how === 'user_alias'
+}
+
 function fmtNum(v, digits = 2) {
   if (v === null || v === undefined || v === '') return '-'
   const n = Number(v);
@@ -61,4 +81,4 @@ function fmtGb(v) {
   return `${n.toFixed(n < 10 ? 2 : 1)} GB`
 }
 
-export { CONFIDENCE_LABEL as C, SOURCE_LABEL as S, fmtEta as a, fmtGb as b, describeError as d, fmtNum as f, unwrapResponse as u };
+export { CONFIDENCE_LABEL as C, LEVEL_MATCH_LABEL as L, SOURCE_LABEL as S, fmtEta as a, fmtGb as b, describeError as d, fmtNum as f, isSoftMatch as i, unwrapResponse as u };

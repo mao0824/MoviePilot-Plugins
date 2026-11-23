@@ -189,6 +189,76 @@ def main() -> int:
     check("{text} 取字段", rule_texts([{"text": "x"}, {"text": "y"}]) == ["x", "y"])
     check("混合 + 脏值安全", rule_texts(["a", {"text": "b"}, {}, None]) == ["a", "b"])
 
+    # ------------------------------------------------------------------
+    # 等级名匹配:档位错一级,ETA 就全错 —— 这里逐级钉住行为
+    # ------------------------------------------------------------------
+    print("[9] 等级名别名匹配(宁缺勿错)")
+    resolve = instance._SiteLevelBoard__resolve_level
+    std = [{"order": i + 1, "name": n} for i, n in enumerate(
+        ["User", "Power User", "Elite User", "Crazy User", "Insane User",
+         "Veteran User", "Extreme User", "Ultimate User", "Nexus Master"])]
+
+    r = resolve(std, "Power User")
+    check("原文一致 → exact", (r["order"], r["how"]) == (2, "exact"))
+    r = resolve(std, "PowerUser")
+    check("只差空格 → compact", (r["order"], r["how"]) == (2, "compact"))
+    r = resolve(std, "中级用户")
+    check("中文名经别名组 → Elite User", (r["order"], r["how"]) == (3, "alias"))
+    r = resolve(std, "EU")
+    check("缩写 EU → Elite User", (r["order"], r["how"]) == (3, "alias"))
+    r = resolve(std, "贵宾")
+    check("贵宾认得出是 VIP、但阶梯里没有 → off_ladder",
+          (r["order"], r["how"], r["matched"]) == (None, "off_ladder", "VIP"))
+    r = resolve(std, "完全没见过的名字")
+    check("对不上 → none", (r["order"], r["how"]) == (None, "none"))
+
+    themed = [{"order": 1, "name": "黔首(Peasant)"}, {"order": 2, "name": "凡人(Power User)"},
+              {"order": 3, "name": "渡劫一重·人劫(Elite User)"}]
+    r = resolve(themed, "Power User")
+    check("括号里的英文别名能反查 → 凡人", (r["order"], r["how"]) == (2, "alias"))
+    r = resolve(themed, "凡人")
+    check("主题中文名原文一致", (r["order"], r["how"]) == (2, "exact"))
+
+    decorated = [{"order": 1, "name": "憨头憨脑 User"}, {"order": 2, "name": "满面娇憨 Nexus Master"}]
+    r = resolve(decorated, "User")
+    check("中英混排「憨头憨脑 User」认得 User", (r["order"], r["how"]) == (1, "alias"))
+    r = resolve(decorated, "NEXUS MASTER")
+    check("中英混排 + 大小写", (r["order"], r["how"]) == (2, "alias"))
+
+    solar = [{"order": 1, "name": "Lv.1 白露"}, {"order": 3, "name": "Lv.3 霜降"}]
+    r = resolve(solar, "霜降")
+    check("去掉「Lv.3」前缀后对上", (r["order"], r["how"]) == (3, "alias"))
+
+    both = [{"order": 2, "name": "Elite"}, {"order": 3, "name": "Elite User"}]
+    r = resolve(both, "中级用户")
+    check("同组命中多档 → ambiguous(不猜)", (r["order"], r["how"]) == (None, "ambiguous"))
+    r = resolve(both, "Elite")
+    check("原文一致优先于歧义", (r["order"], r["how"]) == (2, "exact"))
+
+    instance._level_alias_map = mod._parse_alias_rules("example.com|初级|Power User")
+    r = resolve(std, "初级", "example.com")
+    check("配置别名 → user_alias", (r["order"], r["how"]) == (2, "user_alias"))
+    r = resolve(std, "初级", "other.com")
+    check("配置别名只对该域名生效", r["how"] == "none")
+    instance._level_alias_map = {}
+
+    print("[10] 别名表与规则库文件")
+    check("level_aliases.json 已加载", len(mod.ALIAS_GROUPS) >= 10, f"groups={len(mod.ALIAS_GROUPS)}")
+    check("规则库 174 个域名", len(mod.LEVEL_SPECS_BY_DOMAIN) >= 170,
+          f"domains={len(mod.LEVEL_SPECS_BY_DOMAIN)}")
+    check("规则库键不带 www.", not any(k.startswith("www.") for k in mod.LEVEL_SPECS_BY_DOMAIN))
+    # 内置 3 站是人工核对的快照,编号口径保持原样(PT时间 的 Peasant=0 是有意的降级档);
+    # 从 depiler 导入的部分必须统一成 1..N,否则「还差几级」会整体差一档。
+    builtin = set(mod.BUILTIN_DOMAIN_MAP.values())
+    external = {k: v for k, v in mod.LEVEL_SPECS_BY_DOMAIN.items() if k not in builtin}
+    bad_order = [k for k, s in external.items()
+                 if (s.get("ladder") or []) and s["ladder"][0].get("order") != 1]
+    check("外部规则库档位从 1 起(depiler 有从 0 起的)", not bad_order, f"bad={bad_order[:3]}")
+    strict = [k for k, s in external.items()
+              if (s.get("ladder") or [])
+              and [lv.get("order") for lv in s["ladder"]] != list(range(1, len(s["ladder"]) + 1))]
+    check("外部规则库档位连续无空洞", not strict, f"bad={strict[:3]}")
+
     print()
     if FAILED:
         print(f"未通过 {len(FAILED)} 项:{FAILED}")
