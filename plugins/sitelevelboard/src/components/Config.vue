@@ -158,7 +158,7 @@ async function save() {
           <VCol cols="12" md="6">
             <VSelect v-model="form.prefer_source" :items="[
               { title: '站点页优先(推荐)', value: 'site_page' },
-              { title: '内置快照优先', value: 'snapshot' }]"
+              { title: '规则库优先', value: 'snapshot' }]"
                      item-title="title" item-value="value" label="等级规则优先来源" density="compact"
                      variant="outlined" hide-details />
           </VCol>
@@ -178,7 +178,7 @@ async function save() {
         <VSwitch v-model="form.manual_first" label="手动规则优先于内置规则" hide-details class="mb-2" />
         <VTextarea v-model="form.manual_rules" label="手动等级规则(每行一条)" rows="4" density="compact"
                    variant="outlined" hide-details
-                   placeholder="站点ID|等级名|条件表达式,如:2|Lv.4|经验>=20000" />
+                   placeholder="域名|等级名|条件表达式,如:m-team.cc|Power User|下载>=200;也兼容旧的站点ID写法" />
         <div class="text-caption text-medium-emphasis mt-2">
           站点不公开等级门槛时(如馒头)用内置快照兜底,数据页会标注来源与快照日期;有更准的门槛可填在这里覆盖。
         </div>

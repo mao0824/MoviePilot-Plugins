@@ -16,7 +16,8 @@
   L1 当前值 : **自己取** —— 直读 mp 自身库 `/config/user.db` 的 `siteuserdata`
               (该表按 `updated_day` 每天一行,是天然的历史快照 → 斜率不必自建)
   L2 等级规则: **站点页优先 → 内置快照兜底 → 手动规则**;不一致时用站点页但**告警**
-              内置快照来自 PT-depiler(MIT,`pt-plugins/PT-depiler`,342 站定义)与站点页交叉核对
+              内置快照来自 PT-depiler(MIT,`pt-plugins/PT-depiler`,419 站定义)与站点页交叉核对;
+              其中 3 个站(馒头/PTS/PT时间)经过人工核对,优先级高于外部规则库
 
 【渲染契约(踩坑记录,MP v3 前端 renderer 的真实行为)】
   * 文本必须放 ``props.text``(VAlert)或顶层 ``text``(div);``content`` 只放子节点列表
@@ -26,6 +27,7 @@
 """
 
 import json
+import os
 import re
 import sqlite3
 import threading
@@ -260,6 +262,58 @@ LEVEL_SPECS: Dict[int, Dict[str, Any]] = {
 }
 
 
+# ===========================================================================
+# 规则库索引(domain → spec)
+#   * 内置 3 站(馒头/PTS/PT时间)经过人工与站点页核对 → 优先级高于外部规则库
+#   * level_specs.json 由 scripts/import_depiler_rules.py 从 PT-depiler(MIT) 生成,
+#     不覆盖内置站;规则日期通过 _meta.date 标注到 UI
+#   * 查找顺序:手动规则 → 站点页解析 → 内置快照 → 外部规则库 → l1_only
+# ===========================================================================
+BUILTIN_DOMAIN_MAP = {3: "m-team.cc", 4: "ptskit.org", 5: "pttime.org"}
+RULES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "level_specs.json")
+RULES_DATE = SNAPSHOT_DATE
+LEVEL_SPECS_BY_DOMAIN: Dict[str, Dict[str, Any]] = {}
+
+for _sid, _dom in BUILTIN_DOMAIN_MAP.items():
+    if _sid in LEVEL_SPECS:
+        LEVEL_SPECS_BY_DOMAIN[_dom] = LEVEL_SPECS[_sid]
+
+
+def _load_external_rules() -> int:
+    """加载 level_specs.json(外部规则库)。内置站不覆盖,返回新增条数。"""
+    global RULES_DATE
+    try:
+        with open(RULES_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return 0
+    except Exception as e:  # 规则库坏了不能让整个插件起不来
+        logger.warn(f"【站点等级看板】规则库加载失败:{e}")
+        return 0
+    if not isinstance(data, dict):
+        return 0
+    meta = data.pop("_meta", None)
+    if isinstance(meta, dict) and meta.get("date"):
+        RULES_DATE = str(meta["date"])
+    added = 0
+    for dom, spec in data.items():
+        key = str(dom or "").lower().strip()
+        if not key or not isinstance(spec, dict) or key in LEVEL_SPECS_BY_DOMAIN:
+            continue
+        LEVEL_SPECS_BY_DOMAIN[key] = spec
+        added += 1
+    return added
+
+
+def _domain_candidates(domain: str) -> List[str]:
+    """域名后缀候选:``kp.m-team.cc`` → [``kp.m-team.cc``, ``m-team.cc``, ``cc``]。"""
+    parts = str(domain or "").lower().strip().split(".")
+    return [".".join(parts[i:]) for i in range(max(1, len(parts) - 1))]
+
+
+_RULES_ADDED = _load_external_rules()
+
+
 class TrackPayload(BaseModel):
     """「新增/删除站点」请求体。"""
     site_id: int = 0
@@ -304,7 +358,7 @@ class SiteLevelBoard(_PluginBase):
     plugin_desc = "把绑定站点的等级、晋级条件、ETA(预计多久到下一级)、保号与封号风险汇成一页,附流量时间线。"
     # 裸文件名只会去 mp 内置 plugin_icon/ 里找(没有我们的图标),所以用本仓库的 raw 地址自带图标
     plugin_icon = "https://raw.githubusercontent.com/mao0824/MoviePilot-Plugins/main/icons/level-board.png"
-    plugin_version = "0.1.3"
+    plugin_version = "0.2.0"
     plugin_author = "Niven"
     author_url = "https://github.com/mao0824"
     plugin_config_prefix = "sitelevelboard_"
@@ -515,7 +569,7 @@ class SiteLevelBoard(_PluginBase):
                             self.__select("sites", "参与站点(留空=全部)", 6, site_opts, multiple=True),
                             self.__select("prefer_source", "等级规则优先来源", 6, [
                                 {"title": "站点页优先(推荐)", "value": "site_page"},
-                                {"title": "内置快照优先", "value": "snapshot"},
+                                {"title": "规则库优先", "value": "snapshot"},
                             ], multiple=False),
                         ]),
                         self.__row([
@@ -523,8 +577,11 @@ class SiteLevelBoard(_PluginBase):
                             self.__text("timeout", "请求超时(秒)", 4, "20"),
                         ]),
                         self.__alert("**当前值**一律自己取(直读 mp 的 siteuserdata,不依赖外部);"
-                                     "**等级规则**按「站点页 → 内置规则快照 → 手动规则」依次兜底。"
-                                     "内置快照日期:%s(来源 PT-depiler,MIT)。" % SNAPSHOT_DATE,
+                                     "**等级规则**按「站点页 → 内置规则库 → 手动规则」依次兜底。"
+                                     "内置规则库:%d 站(人工核对) + %d 站(PT-depiler,MIT,快照 %s)。"
+                                     % (len(BUILTIN_DOMAIN_MAP),
+                                        max(0, len(LEVEL_SPECS_BY_DOMAIN) - len(BUILTIN_DOMAIN_MAP)),
+                                        RULES_DATE),
                                      "info", 12),
                     ]),
 
@@ -533,7 +590,8 @@ class SiteLevelBoard(_PluginBase):
                         self.__row([self.__switch("manual_first", "手动规则优先于内置规则", 6)]),
                         self.__row([
                             self.__textarea("manual_rules", "手动等级规则(每行一条)", 12, 4,
-                                            "站点ID|等级名|条件表达式,如:2|Lv.4|经验>=20000"),
+                                            "域名|等级名|条件表达式,如:m-team.cc|Power User|下载>=200;"
+                                            "也兼容旧的站点ID写法(2|Lv.4|经验>=20000)"),
                         ]),
                         self.__alert("站点不公开等级门槛时(如馒头)用内置快照兜底,UI 会标注来源与快照日期;"
                                      "快照可能滞后,若你手上有更准的门槛,填在这里覆盖。",
@@ -677,7 +735,7 @@ class SiteLevelBoard(_PluginBase):
                                    "active": bool(site.get("is_active"))})
         return schemas.Response(success=True, data={
             "tracked": tracked, "candidates": candidates,
-            "last_refresh": state.get("time"), "snapshot_date": SNAPSHOT_DATE})
+            "last_refresh": state.get("time"), "snapshot_date": RULES_DATE})
 
     def api_detail(self, site_id: int = 0, live: int = 0):
         """单站详情:内存缓存 → level_state 缓存 → 现场评估(顺带回填缓存)。
@@ -839,7 +897,7 @@ class SiteLevelBoard(_PluginBase):
         domain, sid = site.get("domain"), int(site.get("id"))
         hist = self.__history(domain, 14)
         cur = hist[-1] if hist else {}
-        spec = self.__spec_for(sid, site)
+        spec = self.__spec_for(site)
 
         # 站点页 / 官方 API 的实时值优先:馒头与 PT时间 的**当前等级**以它们为准
         # (siteuserdata 只是 mp 的每日快照,可能落后)
@@ -1125,34 +1183,48 @@ class SiteLevelBoard(_PluginBase):
     # =====================================================================
     # 等级规则:站点页 → 内置快照 → 手动规则
     # =====================================================================
-    def __spec_for(self, sid: int, site: Dict[str, Any]) -> Dict[str, Any]:
-        manual = self.__manual_spec(sid)
+    def __spec_for(self, site: Dict[str, Any]) -> Dict[str, Any]:
+        domain = str(site.get("domain") or "").lower()
+        sid = int(site.get("id") or 0)
+        manual = self.__manual_spec(domain, sid)
         if self._manual_first and manual:
             manual["source"] = "manual"
             return manual
 
         spec = None
         if self._use_site_page and self._prefer_source == "site_page":
-            spec = self.__site_page_spec(sid, site)
+            spec = self.__site_page_spec(site)
         if not spec:
-            spec = LEVEL_SPECS.get(sid)
-            if spec:
-                spec = dict(spec)
-                # 站点页拿不到时,快照的来源要如实标注
-                if spec.get("source") == "site_page":
-                    spec["source"] = "ptd_snapshot"
+            spec = self.__rules_for(domain, sid)
         if not spec:
             spec = manual or {"source": "l1_only", "ladder": [], "keep_rules": [], "ban_rules": []}
-        spec.setdefault("snapshot_date", SNAPSHOT_DATE)
+        spec.setdefault("snapshot_date", RULES_DATE)
         return spec
 
-    def __site_page_spec(self, sid: int, site: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    @staticmethod
+    def __rules_for(domain: str, sid: int) -> Optional[Dict[str, Any]]:
+        """按域名后缀查规则库;查不到再按 sid 兜底(兼容老配置的站点 ID)。"""
+        for cand in _domain_candidates(domain):
+            spec = LEVEL_SPECS_BY_DOMAIN.get(cand)
+            if spec:
+                return dict(spec)
+        spec = LEVEL_SPECS.get(sid)
+        if spec:
+            spec = dict(spec)
+            # 站点页拿不到时,快照的来源要如实标注
+            if spec.get("source") == "site_page":
+                spec["source"] = "ptd_snapshot"
+            return spec
+        return None
+
+    def __site_page_spec(self, site: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """站点页解析:PTS 用 /faq.php 校验快照,PT时间 用等级校验页**整段重建**阶梯与条款。
 
         馒头门槛不公开(全站 SPA)→ 继续用内置快照,但当前值走官方 API(见 __live_values)。
+        ⚠️ 只按域名判断:发布版不能依赖本地站点 ID(换个人/重建站点库就会错位)。
         """
         domain = str(site.get("domain") or "").lower()
-        if sid == 4 or "ptskit" in domain:
+        if "ptskit" in domain:
             return self.__pts_spec(site)
         if "pttime" in domain:
             return self.__pttime_spec(site)
@@ -1293,17 +1365,31 @@ class SiteLevelBoard(_PluginBase):
         return keep_rules, ban_rules, permanent_name, parkable_name
 
     # ---- 手动规则解析 -----------------------------------------------------
-    def __manual_spec(self, sid: int) -> Optional[Dict[str, Any]]:
+    def __manual_spec(self, domain: str, sid: int) -> Optional[Dict[str, Any]]:
+        """每行 ``域名或站点ID | 等级名 | 条件表达式``。
+
+        推荐写域名(如 ``m-team.cc | Power User | 下载>=200``),发布版不再依赖本地
+        站点 ID;纯数字的第一段仍按站点 ID 匹配,兼容老配置。
+        """
         if not self._manual_rules:
             return None
+        cands = set(_domain_candidates(domain))
         ladder = []
         for raw in self._manual_rules.splitlines():
             line = raw.strip()
             if not line or line.startswith("#"):
                 continue
             parts = [x.strip() for x in line.split("|")]
-            if len(parts) < 3 or not parts[0].isdigit() or int(parts[0]) != sid:
+            if len(parts) < 3:
                 continue
+            head = parts[0]
+            if head.isdigit():
+                if int(head) != sid:
+                    continue
+            else:
+                key = head.lower().lstrip("*.")     # 允许写 *.m-team.cc
+                if key not in cands and key not in str(domain or "").lower():
+                    continue
             _, name, expr = parts[0], parts[1], parts[2]
             reqs = []
             for m in re.finditer(r"([\u4e00-\u9fa5A-Za-z_]+)\s*(>=|>)\s*([\d.]+)", expr):
@@ -1351,7 +1437,7 @@ class SiteLevelBoard(_PluginBase):
         """给前端的单站详情:评估结果 + 完整阶梯 + 最近历史(供画时间线)。"""
         sid = int(r.get("site_id") or 0)
         site = self.__site_by_id(sid) or {}
-        spec = self.__spec_for(sid, site)
+        spec = self.__spec_for(site)
         ladder = []
         for lv in (spec.get("ladder") or []):
             ladder.append({
@@ -1509,7 +1595,7 @@ class SiteLevelBoard(_PluginBase):
         """真正去抓站点页/官方 API(不查缓存)。"""
         domain = str(site.get("domain") or "").lower()
         try:
-            if int(site.get("id") or 0) == 4 or "ptskit" in domain:
+            if "ptskit" in domain:
                 return self.__live_pts(site)
             if "m-team" in domain:
                 return self.__live_mteam(site)
@@ -1748,7 +1834,7 @@ class SiteLevelBoard(_PluginBase):
         if not state:
             return "尚未刷新过 —— 点下方「立即刷新」开始(首次约 10~60 秒)"
         return "上次刷新:%s | 站点 %d 个 | 内置快照日期:%s" % (
-            state.get("time") or "-", len(state.get("sites") or []), SNAPSHOT_DATE)
+            state.get("time") or "-", len(state.get("sites") or []), RULES_DATE)
 
     def __text_overview(self, sites: List[Dict[str, Any]]) -> str:
         if not sites:

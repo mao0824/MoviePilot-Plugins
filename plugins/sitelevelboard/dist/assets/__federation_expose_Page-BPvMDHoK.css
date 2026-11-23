@@ -1,27 +1,27 @@
 
 /* 只做微调;主题色/间距一律沿用宿主 Vuetify 主题 */
-.bg-primary tr td[data-v-144e16c4],
-tr.bg-primary td[data-v-144e16c4] {
+.bg-primary tr td[data-v-92fef44a],
+tr.bg-primary td[data-v-92fef44a] {
   background: rgba(var(--v-theme-primary), 0.12);
 }
 
 /* 右侧页签:贴着状态条底部,与内容区用同一条分隔线 */
-.slb-tabs[data-v-144e16c4] {
+.slb-tabs[data-v-92fef44a] {
   border-top: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
 }
 
 /* 流量趋势曲线:撑满宽度、鼠标可读数值 */
-.slb-chart[data-v-144e16c4] {
+.slb-chart[data-v-92fef44a] {
   cursor: crosshair;
   position: relative;          /* 准星/数据点按百分比绝对定位,需要它做参照 */
 }
-.slb-chart svg[data-v-144e16c4] {
+.slb-chart svg[data-v-92fef44a] {
   display: block;
   width: 100%;
   height: 80px;                 /* 原来 64px:14 天的折线挤在一起,涨跌看不出斜率差别 */
 }
 /* 悬浮准星:一条竖线 + 一个圆点,比「只能读下面那行字」更容易对上某天 */
-.slb-cross[data-v-144e16c4] {
+.slb-cross[data-v-92fef44a] {
   position: absolute;
   top: 0;
   bottom: 0;
@@ -29,7 +29,7 @@ tr.bg-primary td[data-v-144e16c4] {
   background: rgba(var(--v-theme-primary), 0.45);
   pointer-events: none;
 }
-.slb-dot[data-v-144e16c4] {
+.slb-dot[data-v-92fef44a] {
   position: absolute;
   width: 9px;
   height: 9px;
@@ -41,28 +41,28 @@ tr.bg-primary td[data-v-144e16c4] {
 }
 
 /* 全站对比表:整行可点 —— 悬停给底色,别让人猜「这里能不能点」 */
-.slb-compare tbody tr[data-v-144e16c4] {
+.slb-compare tbody tr[data-v-92fef44a] {
   cursor: pointer;
 }
-.slb-compare tbody tr:hover td[data-v-144e16c4] {
+.slb-compare tbody tr:hover td[data-v-92fef44a] {
   background: rgba(var(--v-theme-primary), 0.06);
 }
-.slb-cname[data-v-144e16c4],
-.slb-cdomain[data-v-144e16c4] {
+.slb-cname[data-v-92fef44a],
+.slb-cdomain[data-v-92fef44a] {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 /* 汇总文本:等宽字体,便于阅读对齐 */
-.slb-report[data-v-144e16c4] textarea {
+.slb-report[data-v-92fef44a] textarea {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
 }
 
 /* ⓘ tooltip:数据来源/更新于/站点侧实时 两列对齐,标签灰、值正常色。
    ⚠️ 必须用 :deep() —— tooltip 内容被 Teleport 到 body,普通 scoped 选择器选不中 */
-[data-v-144e16c4] .slb-meta {
+[data-v-92fef44a] .slb-meta {
   display: grid;
   grid-template-columns: auto 1fr;
   column-gap: 10px;
@@ -70,32 +70,32 @@ tr.bg-primary td[data-v-144e16c4] {
   font-size: 12px;
   line-height: 1.45;
 }
-[data-v-144e16c4] .slb-meta div {
+[data-v-92fef44a] .slb-meta div {
   display: contents;
 }
-[data-v-144e16c4] .slb-meta b {
+[data-v-92fef44a] .slb-meta b {
   font-weight: 500;
   opacity: 0.7;
   white-space: nowrap;
 }
 
 /* 左侧站点列表:可拖动 + 插入位置提示 */
-.slb-item[data-v-144e16c4] {
+.slb-item[data-v-92fef44a] {
   cursor: grab;
 }
-.slb-item.slb-dragging[data-v-144e16c4] {
+.slb-item.slb-dragging[data-v-92fef44a] {
   opacity: 0.4;
 }
-.slb-item.slb-drop-above[data-v-144e16c4] {
+.slb-item.slb-drop-above[data-v-92fef44a] {
   box-shadow: inset 0 2px 0 0 rgb(var(--v-theme-primary));
 }
-.slb-item.slb-drop-below[data-v-144e16c4] {
+.slb-item.slb-drop-below[data-v-92fef44a] {
   box-shadow: inset 0 -2px 0 0 rgb(var(--v-theme-primary));
 }
 /* 站点名过长时省略,别把等级 chip 挤掉。
    ⚠️ 必须 min-width:0 + flex:1:flex item 默认 min-width:auto 会拒绝收缩,
    名字一长就把 chip 顶到下一行(2026-11-22 「Rousi Pro / Lv.3」实测换行)。 */
-.slb-name[data-v-144e16c4] {
+.slb-name[data-v-92fef44a] {
   min-width: 0;
   flex: 1;
   overflow: hidden;
@@ -103,17 +103,17 @@ tr.bg-primary td[data-v-144e16c4] {
   white-space: nowrap;
 }
 /* 副标题:域名 + 账号名,一行放不下时省略;账号名靠右灰显,不与域名抢视线 */
-.slb-sub[data-v-144e16c4] {
+.slb-sub[data-v-92fef44a] {
   display: flex;
   align-items: center;
   gap: 8px;
 }
-.slb-domain[data-v-144e16c4] {
+.slb-domain[data-v-92fef44a] {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.slb-account[data-v-144e16c4] {
+.slb-account[data-v-92fef44a] {
   margin-left: auto;
   flex-shrink: 0;
   display: inline-flex;
@@ -122,10 +122,10 @@ tr.bg-primary td[data-v-144e16c4] {
   opacity: 0.75;
 }
 /* 删除按钮:默认淡一点,鼠标移到该条目才显眼(减少视觉噪音) */
-.slb-del[data-v-144e16c4] {
+.slb-del[data-v-92fef44a] {
   opacity: 0.35;
   transition: opacity 0.15s;
 }
-.slb-item:hover .slb-del[data-v-144e16c4] {
+.slb-item:hover .slb-del[data-v-92fef44a] {
   opacity: 1;
 }

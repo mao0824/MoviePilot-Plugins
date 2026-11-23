@@ -39,6 +39,7 @@ export const SOURCE_LABEL = {
   site_page_verified: '站点页(已校验)',
   site_page_diff: '站点页(与快照不一致)',
   ptd_snapshot: '内置快照',
+  depiler_snapshot: '规则库(depiler)',
   manual: '手动规则',
   l1_only: '仅当前等级',
   error: '评估失败',

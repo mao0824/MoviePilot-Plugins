@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import { f as fmtNum, S as SOURCE_LABEL, a as fmtEta, b as fmtGb, C as CONFIDENCE_LABEL, d as describeError, u as unwrapResponse } from './utils-JdTrmUsi.js';
+import { f as fmtNum, S as SOURCE_LABEL, a as fmtEta, b as fmtGb, C as CONFIDENCE_LABEL, d as describeError, u as unwrapResponse } from './utils-xMnE5CKH.js';
 
 const _export_sfc = (sfc, props) => {
   const target = sfc.__vccOpts || sfc;
@@ -953,7 +953,7 @@ return (_ctx, _cache) => {
           _createVNode(_component_VCol, null, {
             default: _withCtx(() => [
               _cache[17] || (_cache[17] = _createElementVNode("div", { class: "text-h6" }, "站点等级看板", -1)),
-              _createElementVNode("div", _hoisted_1, " 上次刷新:" + _toDisplayString(meta.value.last_refresh || '从未') + " · 内置等级规则快照:" + _toDisplayString(meta.value.snapshot_date || '-') + " · 看板站点 " + _toDisplayString(tracked.value.length) + " 个 ", 1)
+              _createElementVNode("div", _hoisted_1, " 上次刷新:" + _toDisplayString(meta.value.last_refresh || '从未') + " · 等级规则库:" + _toDisplayString(meta.value.snapshot_date || '-') + " · 看板站点 " + _toDisplayString(tracked.value.length) + " 个 ", 1)
             ]),
             _: 1
           }),
@@ -1471,7 +1471,7 @@ return (_ctx, _cache) => {
                                           _cache[31] || (_cache[31] = _createElementVNode("b", null, "数据来源", -1)),
                                           _createTextVNode(_toDisplayString(_unref(SOURCE_LABEL)[detail.value.source] || detail.value.source || '-'), 1)
                                         ]),
-                                        (detail.value.source === 'ptd_snapshot')
+                                        (detail.value.source === 'ptd_snapshot' || detail.value.source === 'depiler_snapshot')
                                           ? (_openBlock(), _createElementBlock("div", _hoisted_30, [
                                               _cache[32] || (_cache[32] = _createElementVNode("b", null, "快照日期", -1)),
                                               _createTextVNode(_toDisplayString(detail.value.snapshot_date || '-'), 1)
@@ -2461,6 +2461,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-144e16c4"]]);
+const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-92fef44a"]]);
 
 export { Page as default };

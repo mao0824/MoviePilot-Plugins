@@ -751,7 +751,7 @@ onUnmounted(() => {
       <VCol>
         <div class="text-h6">站点等级看板</div>
         <div class="text-caption text-medium-emphasis">
-          上次刷新:{{ meta.last_refresh || '从未' }} · 内置等级规则快照:{{ meta.snapshot_date || '-' }}
+          上次刷新:{{ meta.last_refresh || '从未' }} · 等级规则库:{{ meta.snapshot_date || '-' }}
           · 看板站点 {{ tracked.length }} 个
         </div>
       </VCol>
@@ -959,7 +959,7 @@ onUnmounted(() => {
                   <div>
                     <b>数据来源</b>{{ SOURCE_LABEL[detail.source] || detail.source || '-' }}
                   </div>
-                  <div v-if="detail.source === 'ptd_snapshot'">
+                  <div v-if="detail.source === 'ptd_snapshot' || detail.source === 'depiler_snapshot'">
                     <b>快照日期</b>{{ detail.snapshot_date || '-' }}
                   </div>
                   <div>

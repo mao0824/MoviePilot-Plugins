@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import { d as describeError, u as unwrapResponse } from './utils-JdTrmUsi.js';
+import { d as describeError, u as unwrapResponse } from './utils-xMnE5CKH.js';
 
 const {createElementVNode:_createElementVNode,resolveComponent:_resolveComponent,openBlock:_openBlock,createBlock:_createBlock,createCommentVNode:_createCommentVNode,toDisplayString:_toDisplayString,createTextVNode:_createTextVNode,withCtx:_withCtx,createVNode:_createVNode} = await importShared('vue');
 
@@ -428,7 +428,7 @@ return (_ctx, _cache) => {
                         "onUpdate:modelValue": _cache[12] || (_cache[12] = $event => ((form.value.prefer_source) = $event)),
                         items: [
               { title: '站点页优先(推荐)', value: 'site_page' },
-              { title: '内置快照优先', value: 'snapshot' }],
+              { title: '规则库优先', value: 'snapshot' }],
                         "item-title": "title",
                         "item-value": "value",
                         label: "等级规则优先来源",
@@ -509,7 +509,7 @@ return (_ctx, _cache) => {
                 density: "compact",
                 variant: "outlined",
                 "hide-details": "",
-                placeholder: "站点ID|等级名|条件表达式,如:2|Lv.4|经验>=20000"
+                placeholder: "域名|等级名|条件表达式,如:m-team.cc|Power User|下载>=200;也兼容旧的站点ID写法"
               }, null, 8, ["modelValue"]),
               _cache[21] || (_cache[21] = _createElementVNode("div", { class: "text-caption text-medium-emphasis mt-2" }, " 站点不公开等级门槛时(如馒头)用内置快照兜底,数据页会标注来源与快照日期;有更准的门槛可填在这里覆盖。 ", -1))
             ]),

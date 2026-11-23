@@ -6,7 +6,7 @@ MoviePilot **v3** 插件市场仓库。
 
 | 插件 | 版本 | 说明 |
 |---|---|---|
-| [站点等级看板](plugins/sitelevelboard) `SiteLevelBoard` | v0.1.3 | 把绑定站点的等级 / 下一级条件 / ETA / 全部阶梯 / 保号与封号风险汇成一页，附流量时间线 |
+| [站点等级看板](plugins/sitelevelboard) `SiteLevelBoard` | v0.2.0 | 把绑定站点的等级 / 下一级条件 / ETA / 全部阶梯 / 保号与封号风险汇成一页，附流量时间线；内置 174 个域名的等级规则库 |
 
 ## 安装
 
@@ -23,7 +23,8 @@ https://github.com/mao0824/MoviePilot-Plugins
 - **不绑定任何特定环境**：站点、阈值、通知渠道全部走配置页；
 - **不依赖其它插件**：数据只来自 MoviePilot 自带的 `user.db`（`siteuserdata` 每日快照）、站点页，
   以及插件自己落盘的数据；
-- **等级规则**：站点页优先 → 内置快照（来源 [PT-depiler](https://github.com/pt-plugins/PT-depiler)，MIT）兜底 → 可手动覆盖。
+- **等级规则**：站点页优先 → 内置规则库（174 个域名，来源 [PT-depiler](https://github.com/pt-plugins/PT-depiler)，MIT）兜底 → 可手动覆盖；
+  规则按**域名**索引，不依赖本地站点 ID。
 
 ## 仓库结构
 
